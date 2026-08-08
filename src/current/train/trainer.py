@@ -1,0 +1,264 @@
+"""TGC 训练/评估/预测编排（端到端复现 legacy 效果）。
+
+产物落 repository/outputs/current_tgc_<时间戳>/：
+  train_dataset.csv / test_dataset.csv / test_predictions.csv / 2025_predictions.csv
+  training_loss.png / prediction_scatter.png / graph_*.csv
+"""
+from __future__ import annotations
+
+import json
+from datetime import datetime
+from pathlib import Path
+from typing import Optional
+
+import numpy as np
+import pandas as pd
+import torch
+import torch.nn as nn
+from scipy.stats import pearsonr, spearmanr
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.preprocessing import StandardScaler
+
+from src.current.config import CONFIG
+from src.current.models.tgc import TGCModel
+from src.current.train.dataset import (DatasetBundle, build_dataset,
+                                       build_graph, build_graph_by_pred_year)
+from src.current.viz.base import VizManager
+
+_EPS = 1e-4  # logit 变换裁剪，避免 log(0)
+
+
+def _logit(x: np.ndarray) -> np.ndarray:
+    """概率 -> logit(实数)，用于在对数几率空间评估 R²（不受开关影响）。"""
+    xc = np.clip(np.asarray(x, dtype=np.float64), _EPS, 1 - _EPS)
+    return np.log(xc / (1 - xc))
+
+
+def _safe_corr(func, a, b) -> float:
+    """计算相关系数，样本过少/常数序列时返回 nan 安全值。"""
+    try:
+        if len(a) < 3 or np.std(a) == 0 or np.std(b) == 0:
+            return float("nan")
+        r = func(a, b)[0]
+        return float(r)
+    except Exception:
+        return float("nan")
+
+
+class Trainer:
+    def __init__(self, config=CONFIG) -> None:
+        self.cfg = config
+        self.scaler = StandardScaler()
+        self.model: Optional[TGCModel] = None
+        self.viz = VizManager()
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.out_dir: Path = self.cfg.outputs_dir / f"current_tgc_{ts}"
+        self.out_dir.mkdir(parents=True, exist_ok=True)
+        self._agent = self._maybe_agent()
+        # logit 标签变换开关（缓解低方差）
+        self.logit = (self.cfg.model.label_transform == "logit")
+        self._final_activation = "identity" if self.logit else "sigmoid"
+
+    # -- 标签变换 ---------------------------------------------------------
+    def _to_train_target(self, y: np.ndarray) -> np.ndarray:
+        if self.logit:
+            yc = np.clip(y, _EPS, 1 - _EPS)
+            return np.log(yc / (1 - yc))
+        return y
+
+    def _to_prob(self, pred: np.ndarray) -> np.ndarray:
+        if self.logit:
+            return 1.0 / (1.0 + np.exp(-pred))
+        return pred
+
+    def _build_graph(self, edges, companies, pred_years):
+        """按 config 选择建图方案。"""
+        if self.cfg.model.graph_scheme == "densest_legacy":
+            return build_graph(edges, companies)  # 已废弃，仅对照
+        return build_graph_by_pred_year(edges, companies, pred_years,
+                                        lag=self.cfg.model.graph_lag)
+
+    def _maybe_agent(self):
+        if not self.cfg.agent.enabled:
+            return None
+        from src.current.registry import AGENT_HOOKS
+        import src.current.agents  # noqa: F401  确保注册
+        try:
+            return AGENT_HOOKS.create(self.cfg.agent.hook)
+        except KeyError as e:
+            print(f"[agent] 未找到 hook {self.cfg.agent.hook}: {e}")
+            return None
+
+    # -- 核心流程 ---------------------------------------------------------
+    def run(self) -> dict:
+        bundle = build_dataset()
+        if len(bundle.train.X) == 0:
+            raise RuntimeError("训练集为空，无法训练。请检查 nodes/labels 是否已生成。")
+
+        self._save_split_csv(bundle)
+
+        # 特征标准化（在训练集拟合）
+        n, t, f = bundle.train.X.shape
+        Xtr = self.scaler.fit_transform(bundle.train.X.reshape(-1, f)).reshape(n, t, f)
+        x_tr = torch.tensor(Xtr, dtype=torch.float)
+        y_tr = torch.tensor(self._to_train_target(bundle.train.y), dtype=torch.float).view(-1, 1)
+
+        # 训练集图（按预测年对齐）
+        tr_ei, tr_ew = self._build_graph(bundle.edges, bundle.train.companies, bundle.train.pred_years)
+        use_gcn = tr_ei is not None
+        print(f"[train] 建图方案={self.cfg.model.graph_scheme} | 标签变换={self.cfg.model.label_transform} | "
+              f"模式: {'GCNConv(有图)' if use_gcn else '简化卷积(无图)'}")
+        self.viz.dispatch("graph", {"nodes": bundle.nodes, "edges": bundle.edges}, self.out_dir)
+
+        self.model = TGCModel(input_dim=f, cfg=self.cfg.model, use_gcn=use_gcn,
+                              final_activation=self._final_activation)
+        losses = self._train_loop(x_tr, y_tr, tr_ei, tr_ew)
+        self.viz.dispatch("training", {"losses": losses}, self.out_dir)
+
+        metrics = {}
+        if len(bundle.test.X) > 0:
+            metrics = self._evaluate(bundle)
+        if bundle.future is not None:
+            self._predict_future(bundle)
+
+        if self._agent is not None:
+            self._agent.reflect(metrics)
+
+        run_info = {
+            "n_train": int(len(bundle.train.X)),
+            "n_test": int(len(bundle.test.X)),
+            "n_future": int(len(bundle.future.X)) if bundle.future is not None else 0,
+            "use_gcn": bool(use_gcn),
+            "train_sample_edges": int(tr_ei.shape[1]) if tr_ei is not None else 0,
+            "final_train_loss": float(losses[-1]) if losses else None,
+        }
+        self._save_metrics(metrics, run_info)
+
+        print(f"[train] 全部产物已保存到: {self.out_dir}")
+        return {"out_dir": str(self.out_dir), **metrics}
+
+    def _save_metrics(self, metrics: dict, run_info: dict) -> None:
+        """把本次实验的「配置 + 数据规模 + 指标」落盘为 metrics.json，
+        并追加一行到 outputs/experiments_log.csv 便于多组实验横向对比。"""
+        m = self.cfg.model
+        record = {
+            "run_id": self.out_dir.name,
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
+            # -- 实验配置（换时序模型/建图/标签变换做对比时看这里）--
+            "temporal_encoder": m.temporal_encoder,
+            "graph_scheme": m.graph_scheme,
+            "graph_lag": m.graph_lag,
+            "label_transform": m.label_transform,
+            "hidden_dim": m.hidden_dim,
+            "dropout": m.dropout,
+            "temporal_kernel": m.temporal_kernel,
+            "epochs": m.epochs,
+            "lr": m.lr,
+            "weight_decay": m.weight_decay,
+            "seq_len": self.cfg.seq_len,
+            # -- 数据规模 --
+            **run_info,
+            # -- 测试指标 --
+            **{k: v for k, v in metrics.items()},
+        }
+        # 1) 单次详情
+        (self.out_dir / "metrics.json").write_text(
+            json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+        # 2) 追加到全局台账（跨 run 对比）
+        ledger = self.cfg.outputs_dir / "experiments_log.csv"
+        row = pd.DataFrame([record])
+        if ledger.exists():
+            row.to_csv(ledger, mode="a", header=False, index=False, encoding="utf-8-sig")
+        else:
+            row.to_csv(ledger, index=False, encoding="utf-8-sig")
+        print(f"[metrics] 已写入 {self.out_dir / 'metrics.json'}；台账 {ledger}")
+
+    def _train_loop(self, x, y, edge_index, edge_weight):
+        opt = torch.optim.Adam(self.model.parameters(), lr=self.cfg.model.lr,
+                               weight_decay=self.cfg.model.weight_decay)
+        crit = nn.MSELoss()
+        losses = []
+        self.model.train()
+        for epoch in range(self.cfg.model.epochs):
+            opt.zero_grad()
+            out = self.model(x, edge_index, edge_weight)
+            loss = crit(out, y)
+            loss.backward()
+            opt.step()
+            losses.append(float(loss.item()))
+            if epoch % 50 == 0:
+                print(f"[train] epoch {epoch}: loss={loss.item():.6f}")
+        return losses
+
+    def _evaluate(self, bundle: DatasetBundle) -> dict:
+        test = bundle.test
+        n, t, f = test.X.shape
+        Xte = self.scaler.transform(test.X.reshape(-1, f)).reshape(n, t, f)
+        x_te = torch.tensor(Xte, dtype=torch.float)
+        te_ei, te_ew = self._build_graph(bundle.edges, test.companies, test.pred_years)
+        self.model.eval()
+        with torch.no_grad():
+            raw = self.model(x_te, te_ei, te_ew).numpy().flatten()
+        pred = self._to_prob(raw)           # 还原到概率空间，指标口径与 legacy 可比
+        actual = test.y
+
+        mse = mean_squared_error(actual, pred)
+        rmse = float(np.sqrt(mse))          # 量纲与概率一致，比 MSE 直观、比 MAE 更惩罚大误差
+        mae = mean_absolute_error(actual, pred)
+        r2 = r2_score(actual, pred)
+        # 对数几率空间 R²：把挤在 0 附近的概率展开后再算，避免绝对尺度过小导致 R² 天然偏负
+        r2_logit = r2_score(_logit(actual), _logit(pred))
+        # 伪标签任务更看重排序能力：Spearman(rank IC) 与 Pearson(IC)
+        spearman = _safe_corr(spearmanr, actual, pred)
+        ic = _safe_corr(pearsonr, actual, pred)
+        print(f"[eval] 测试集 MSE={mse:.6f} RMSE={rmse:.6f} MAE={mae:.6f} R2(prob)={r2:.4f} "
+              f"R2(logit)={r2_logit:.4f} Spearman={spearman:.4f} IC(Pearson)={ic:.4f}")
+
+        results = pd.DataFrame({
+            "symbol": test.companies,
+            "prediction_year": test.pred_years,
+            "sequence_years": test.sequence_years,
+            "actual_probability": actual,
+            "predicted_probability": pred,
+        })
+        results.to_csv(self.out_dir / "test_predictions.csv", index=False, encoding="utf-8-sig")
+        self.viz.dispatch("evaluation", {"results": results}, self.out_dir)
+        return {"mse": float(mse), "rmse": rmse, "mae": float(mae), "r2": float(r2),
+                "r2_logit": float(r2_logit), "spearman": float(spearman),
+                "ic": float(ic), "n_test": int(n)}
+
+    def _predict_future(self, bundle: DatasetBundle) -> None:
+        fut = bundle.future
+        n, t, f = fut.X.shape
+        Xf = self.scaler.transform(fut.X.reshape(-1, f)).reshape(n, t, f)
+        x_f = torch.tensor(Xf, dtype=torch.float)
+        # 按预测年建图（2025），取 2025-lag 年的边结构
+        pred_years = [2025] * n
+        f_ei, f_ew = self._build_graph(bundle.edges, fut.companies, pred_years)
+        self.model.eval()
+        with torch.no_grad():
+            raw = self.model(x_f, f_ei, f_ew).numpy().flatten()
+        pred = self._to_prob(raw)
+        out = pd.DataFrame({
+            "symbol": fut.companies,
+            "sequence_years": fut.sequence_years,
+            "prediction_year": 2025,
+            "predicted_probability": pred,
+        })
+        out.to_csv(self.out_dir / "2025_predictions.csv", index=False, encoding="utf-8-sig")
+        print(f"[predict] 2025 推演 {len(out)} 家，平均违约概率={pred.mean():.4f}")
+
+    def _save_split_csv(self, bundle: DatasetBundle) -> None:
+        for name, split in (("train", bundle.train), ("test", bundle.test)):
+            if len(split.X) == 0:
+                continue
+            df = pd.DataFrame({
+                "symbol": split.companies,
+                "sequence_years": split.sequence_years,
+                "prediction_year": split.pred_years,
+                self.cfg.label_column: split.y,
+            })
+            for i in range(split.X.shape[1]):
+                for j in range(split.X.shape[2]):
+                    df[f"year_{i+1}_feature_{j+1}"] = split.X[:, i, j]
+            df.to_csv(self.out_dir / f"{name}_dataset.csv", index=False, encoding="utf-8-sig")

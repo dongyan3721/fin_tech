@@ -1,0 +1,466 @@
+# FIN —— 基于图机器学习的供应链金融风险评估
+
+本仓库对原始的「过程数据 + 前辈代码」做了目录重构，并已用 **KMV 违约概率作为伪标签**跑通了 TGC（时序图卷积）训练基线。
+
+下文按「业务问题 → 数据长什么样 → 标签怎么来 → 模型怎么搭 → 输出是什么意思」说明前辈方案，便于接手学习（对应汇报 PPT「图灵风控」）。
+
+---
+
+## 1. 一句话在做什么
+
+> 用上市公司**供应链交易关系**建图，用每家公司的**财务指标**做节点特征，用 **KMV 算出的违约概率**当监督标签；模型吃「连续 3 年」的特征，预测「第 4 年」的违约概率。
+
+这是**回归任务**（拟合 0~1 之间的概率），不是买卖股票的量化交易模型；目标是给供应链金融的授信/风控提供下一年度风险估计。
+
+```mermaid
+flowchart LR
+    A[供应链交易明细] --> B[边表 / 邻接矩阵]
+    C[财务指标] --> D[节点特征矩阵 X]
+    E[股价 + 负债等] --> F[KMV 伪标签 Y]
+    B --> G[TGC 模型]
+    D --> G
+    F --> G
+    G --> H["预测: 下一年违约概率 ŷ ∈ (0,1)"]
+```
+
+---
+
+## 2. 目录结构
+
+```
+FIN/
+├── src/
+│   └── legacy/                 # 前辈原始代码（迁移 + 路径/对齐适配）
+│       ├── train_tgc.py        # ★ 主训练脚本（TGC，三年预测第四年）
+│       ├── node_features.py    # 财务节点特征抓取（Tushare）
+│       ├── kmv.py              # KMV 信用风险标签计算（较全版本）
+│       ├── kmv_simple.py       # KMV 简化版
+│       └── build_graph.py      # 供应链网络/边表构建与可视化
+├── data/
+│   ├── raw/                    # 原始供应链交易数据（Excel）
+│   └── processed/              # 训练直接使用的数据
+│       ├── financial_indicators_robust.csv   # 节点财务特征
+│       ├── kmv_analysis_results.csv          # KMV 伪标签（default_probability）
+│       └── combined_edges.xlsx               # 供应链边表
+├── test/                       # 冒烟测试
+├── outputs/                    # 训练产物（每次运行生成 legacy_tgc_<时间戳>/）
+├── requirements.txt
+├── LLM增强TGC供应链风控_设计文档.md   # 后续 LLM Agent 增强方案（可选阅读）
+└── README.md
+```
+
+> 原始的 `2-过程部分数据/` 目录可保留作备份，确认新结构无误后可自行删除。
+
+---
+
+## 3. 输入数据长什么样
+
+训练时实际读入的是 `data/processed/` 下三张表。股票代码在 `train_tgc.py` 里会统一成 **6 位**（如 `26` → `000026`），否则边对不上。
+
+### 3.1 节点特征：`financial_indicators_robust.csv`
+
+| 角色 | 含义 |
+|------|------|
+| 一行 | 某公司 × 某年 |
+| 主键 | `symbol` + `year` |
+| 用途 | 组成节点特征向量（模型输入的一部分） |
+
+模型实际用到的 10 个特征列：
+
+```
+debt_to_asset_ratio, current_ratio, quick_ratio, interest_coverage_ratio,
+total_assets, total_liab, current_assets, current_liab, revenue, operate_profit
+```
+
+示例（示意）：
+
+| symbol | year | debt_to_asset_ratio | current_ratio | revenue | … |
+|--------|------|---------------------|---------------|---------|---|
+| 000026 | 2021 | 0.18 | 4.75 | 2.19e8 | … |
+| 000026 | 2022 | 0.21 | 3.90 | 2.40e8 | … |
+| 000026 | 2023 | 0.25 | 3.10 | 2.55e8 | … |
+
+来源：前辈用 Tushare 从资产负债表/利润表算比率（见 `src/legacy/node_features.py`）。
+
+### 3.2 图结构（边）：`combined_edges.xlsx`
+
+| 角色 | 含义 |
+|------|------|
+| 一行 | 一条有向供应链关系 |
+| 关键列 | `source`, `target`, `weight`, `relationship`, `proportion`, `year` |
+| 用途 | 谁连谁；`weight` 多为交易金额 |
+
+示例：
+
+| source | target | weight | relationship | proportion | year |
+|--------|--------|--------|--------------|------------|------|
+| 000716 | 000815 | 21108000 | supply | 6.00 | 2001 |
+| 000026 | 000564 | 1934331 | sale | 1.00 | 2001 |
+
+- `supply`：供应商 → 核心企业（采购）
+- `sale`：核心企业 → 客户（销售）
+
+原始明细来自 CSMAR「前五大供应商/客户」；`build_graph.py` 负责清洗并导出边表/邻接矩阵。
+
+### 3.3 伪标签：`kmv_analysis_results.csv`
+
+| 角色 | 含义 |
+|------|------|
+| 一行 | 某公司 × 某年 的 KMV 结果 |
+| 监督目标 | **`default_probability`**（违约概率，0~1） |
+| 附加 | `risk_rating`（AAA~D）、`distance_to_default` 等 |
+
+示例：
+
+| symbol | year | default_probability | risk_rating | distance_to_default |
+|--------|------|---------------------|-------------|---------------------|
+| 000026 | 2024 | 0.185 | BB | 0.90 |
+
+> 注意：这是 **KMV 模型算出来的伪标签**，不是交易所公布的真实违约记录。代码里部分实现还有简化/缺数填充，标签本身带噪声。
+
+### 3.4 送进模型时的张量形状（最重要）
+
+对每个样本（一家公司的一段 4 年窗口）：
+
+```text
+输入 X:  shape = (3, 10)
+         ↑ 连续 3 年     ↑ 每年 10 个财务特征
+
+标签 Y:  shape = (1,)
+         = 第 4 年的 KMV default_probability
+
+整批训练:
+  X_train: (N, 3, 10)
+  y_train: (N,)
+  edge_index: (2, E)   # 当前 batch/样本集合上的边
+  edge_weight: (E,)    # 归一化后的边权
+```
+
+伪代码（样本构造）：
+
+```python
+# 对每家公司，找连续四年: y0, y1, y2, y3
+X = [
+  features[company, y0],   # 第1年财务向量 (10,)
+  features[company, y1],   # 第2年
+  features[company, y2],   # 第3年
+]                          # → (3, 10)
+
+Y = kmv[company, y3].default_probability   # 用前三年预测第四年
+
+# 时间切分（防泄露）
+# 训练集: 预测年 ∈ [2007, 2020]
+# 测试集: 预测年 ∈ [2021, 2024]
+# 推演:   用 2022–2024 特征 → 预测 2025（无真值，只出预测）
+```
+
+```mermaid
+gantt
+    title 单个样本的时间窗口示意
+    dateFormat  YYYY
+    axisFormat  %Y
+    section 输入特征
+    第1年财务 :a1, 2021, 1y
+    第2年财务 :a2, 2022, 1y
+    第3年财务 :a3, 2023, 1y
+    section 标签 / 预测目标
+    第4年KMV违约概率 :a4, 2024, 1y
+```
+
+---
+
+## 4. 标签怎么产生（KMV）
+
+PPT 与代码都采用 **KMV / Merton 思想**：把股权看作以企业资产为标的的看涨期权，反推资产价值与波动率，再算「离违约点有多远」。
+
+```mermaid
+flowchart TD
+    A[股权市值 E<br/>股价 × 股本] --> D[迭代/简化求解<br/>资产价值 A、资产波动率 σA]
+    B[股权波动率 σE] --> D
+    C[负债账面价值] --> D
+    C --> E[违约点 DP<br/>代码里常用总负债 × 0.7]
+    D --> F["违约距离 DD = (A − DP) / (A · σA)"]
+    F --> G["违约概率 EDF = Φ(−DD)"]
+    G --> H[伪标签 Y = EDF]
+    G --> I[映射 8 级评级 AAA~D]
+```
+
+伪代码（对应 `kmv.py` / `kmv_simple.py` 的简化逻辑）：
+
+```python
+market_cap = close_price * shares          # 股权市值
+total_liab = balance_sheet.total_liab
+asset_value ≈ market_cap + total_liab      # 简化：未严格迭代 Merton
+asset_vol  = annualized_stock_return_std
+default_point = total_liab * 0.7
+
+DD = (asset_value - default_point) / (asset_value * asset_vol)
+EDF = NormalCDF(-DD)                       # → default_probability
+rating = map_edf_to_AAA_D(EDF)
+```
+
+**训练时只拿 `default_probability` 当 Y**；评级是展示用。  
+PPT 还提到用 **GARCH + 折算系数**做市场风险标签——**当前打包代码/数据里尚未落地**，基线只有信用侧 KMV。
+
+---
+
+## 5. 图神经网络怎么搭（TGC）
+
+代码类名：`TGCN`（`src/legacy/train_tgc.py`）。PPT 里叫 TGC / 时序图卷积，核心是 **时间建模 + 空间（图）聚合**。
+
+### 5.1 结构示意
+
+```mermaid
+flowchart TB
+    X["输入 X (N, 3, 10)"] --> P[Linear 投影 → hidden=64]
+    P --> T["时间门控卷积 TemporalGatedConv<br/>Conv1d + sigmoid⊗tanh"]
+    T --> R1[残差 + LayerNorm]
+    R1 --> S{"每个时间步 t=1..3"}
+    S -->|有边| GCN["GCNConv<br/>按 edge_index 聚合邻居"]
+    S -->|无边/边太少| MLP["SimpleGCNLayer<br/>其实是 Linear，不用图"]
+    GCN --> R2[残差 + LayerNorm]
+    MLP --> R2
+    R2 --> Pool[AdaptiveAvgPool 压掉时间维]
+    Pool --> Out["MLP → sigmoid → ŷ ∈ (0,1)"]
+```
+
+### 5.2 前向伪代码
+
+```python
+def forward(X, edge_index, edge_weight):
+    # X: (N, T=3, F=10)
+    h = Linear(X)                          # → (N, 3, 64)
+    h = TemporalGatedConv(h) + residual    # 学 3 年内特征演变
+    for t in range(3):
+        h_t = h[:, t, :]                   # (N, 64) 把 N 个样本当成图上的 N 个节点
+        h_t = GCNConv(h_t, edge_index, edge_weight)  # 邻居风险信息聚合
+    h = concat_over_time(h_t)
+    h = AdaptiveAvgPool(h)                 # (N, 64)
+    y_hat = sigmoid(MLP(h))                # (N, 1) 预测违约概率
+    return y_hat
+```
+
+### 5.3 和「标准 GNN」理解上的差异（接手必看）
+
+当前实现里：**一个训练 batch 的第 0 维既是「样本数」，也被当成「图节点数」**。
+
+- 边 `edge_index` 的下标必须指向当前这批样本的行号；
+- 同一家公司若出现在多个年份窗口里，会出现多个样本节点，建图时会把边展开到这些样本上；
+- **legacy（`src/legacy`）**曾用「整批共用最密年」拓扑，训练/测试各选不同年份、口径不一致，是效果波动主因（已废弃）；
+- **新实现（`src/current`，默认）**改为「每个样本用其预测年−1 的图」的分年块对角图，训练/测试口径一致，详见 §12.3.1。
+
+有边且边数 ≥ 10 时走 `GCNConv`；否则退回 `SimpleGCNLayer`（不看边，≈ MLP）。
+
+### 5.4 训练目标与评估
+
+```python
+loss = MSE(y_hat, y_kmv)     # 拟合伪标签（src/current 默认在 logit 空间做 MSE）
+# 测试集报告: MSE / MAE / R²(prob) / R²(logit) / Spearman / IC(Pearson)
+# 尚无真实 0/1 违约标签 → 不算 AUC / KS / F1
+```
+
+**最终目标**：让模型输出的违约概率 `y_hat` 尽量贴合 KMV 算出的违约概率 `y_kmv`（伪标签）。
+「贴合」有两层含义——**数值贴近**（回归精度）和**排序一致**（谁比谁更危险），下面的指标分别衡量这两层。
+
+#### 5.4.1 评价指标详解
+
+| 指标 | 衡量什么 | 越好越… | 与「拟合 KMV 违约概率」的关系 |
+|---|---|---|---|
+| **MSE** | 预测概率与 KMV 概率的**均方误差** | 越小越好（≥0） | 绝对数值误差（平方口径）。KMV 概率大多挤在 0 附近，所以 MSE 天然很小（≈1e-3），单看它不好判断优劣。 |
+| **RMSE** | `√MSE`，均方根误差 | 越小越好（≥0） | 量纲**与概率一致**（可直接读作「典型误差约 0.0x 概率」），比 MSE 直观；因先平方再开方，**比 MAE 更惩罚大误差**。 |
+| **MAE** | 平均**绝对误差** | 越小越好（≥0） | 量纲与概率一致，更抗离群点；「平均每户估错多少概率」。RMSE 与 MAE 差距越大，说明存在少数大偏差样本。 |
+| **R²(prob)** | 在**概率空间**，模型比「直接用均值预测」好多少 | 越接近 1 越好，可为负 | `R² = 1 − MSE/Var(y)`。KMV 概率绝对方差极小（≈0.002），分母小，MSE 稍大就转负，**对这种「小而偏」的目标天生不敏感**。 |
+| **R²(logit)** | 在**对数几率空间**算的同一个 R² | 越接近 1 越好，可为负 | 先把概率 `p` 变换成 `logit(p)=ln(p/(1−p))`，把挤在 0 附近的值展开到实数域再比。消除了「绝对尺度过小」的干扰，比 R²(prob) 更能反映真实拟合质量，也是训练实际优化的空间。 |
+| **Spearman（Rank IC）** | 预测与真实的**秩相关**（名次是否一致） | 越接近 1 越好，∈[−1,1] | 只看**排序**：模型是否把 KMV 认为更危险的公司也排在更前面。不受概率绝对尺度影响，是本任务**最稳、最贴合业务**的指标（风控关心的是「谁更该收紧额度」）。 |
+| **IC（Pearson）** | 预测与真实的**线性相关系数** | 越接近 1 越好，∈[−1,1] | 金融里 IC(Information Coefficient) 指「预测值对真实值的信息含量」。这里用 Pearson，衡量二者**线性同向变动**的强弱；与 Spearman 配合看：IC 高=数值线性相关强，Spearman 高=名次一致强。 |
+
+**为什么强调 Spearman / IC**：真实违约标签缺失，KMV 概率只是**伪标签**，其绝对数值本身就有噪声、且尺度很小。
+在这种情况下，「把高风险户排在前面」（排序正确）比「概率数值分毫不差」更有业务价值，也更能抗伪标签噪声。
+因此 **Spearman/IC 是主看指标，R²(logit) 次之，R²(prob) 仅作参考**（它对小尺度目标天然偏保守，负值不代表模型没学到东西）。
+
+> 直觉例子：若模型把所有公司的相对危险程度都排对了（Spearman≈1），但整体概率系统性高估 0.02，
+> R²(prob) 可能仍是负的，而这对「筛选高风险户」的实际用途毫无影响。
+
+---
+
+## 6. 预期输出是什么意思
+
+| 输出 | 含义 | 取值 |
+|------|------|------|
+| `predicted_probability` | 模型估计的**下一年度违约概率**（在拟合 KMV-EDF） | 约 0~1，经 sigmoid |
+| `actual_probability`（仅测试集） | 同年真实标签侧的 KMV-EDF | 0~1 |
+| `risk_rating`（KMV 表，非模型直接输出） | 按 EDF 分箱的信用等级 | AAA … D |
+
+**业务解读（按前辈汇报逻辑）：**
+
+- 数值越高 → 模型认为信用风险越高；
+- 可用于行业/供应链/单户筛选与排序，**不是**交易信号（买/卖）；
+- 因为标签是 KMV 伪标签，输出应理解为「对 KMV 风险度量的可学习外推」，**不能直接等同于真实违约率**。
+
+产物文件（`outputs/legacy_tgc_<时间戳>/`）：
+
+| 文件 | 内容 |
+|------|------|
+| `train_dataset.csv` / `test_dataset.csv` | 切好的序列样本 |
+| `test_predictions.csv` | 测试集 实际 vs 预测 |
+| `2025_predictions.csv` | 用 2022–2024 推 2025 的概率 |
+| `training_loss.png` | 训练损失曲线 |
+| `prediction_scatter.png` | 实际 vs 预测散点 |
+
+---
+
+## 7. 端到端流程（对照代码入口）
+
+```mermaid
+sequenceDiagram
+    participant Raw as 原始Excel/Tushare
+    participant Feat as node_features.py
+    participant KMV as kmv.py
+    participant Graph as build_graph.py
+    participant Train as train_tgc.py
+
+    Raw->>Graph: 前五大供应商/客户
+    Graph->>Train: combined_edges.xlsx
+    Raw->>Feat: 财报字段
+    Feat->>Train: financial_indicators_robust.csv
+    Raw->>KMV: 股价/负债
+    KMV->>Train: kmv_analysis_results.csv
+    Train->>Train: 3年特征 → 预测第4年 EDF
+    Train->>Train: outputs/*.csv + 图
+```
+
+日常只跑训练（数据已备好）：
+
+```powershell
+$env:PYTHONUTF8="1"
+& ".\.venv\Scripts\python.exe" ".\src\legacy\train_tgc.py"
+```
+
+---
+
+## 8. 环境
+
+本机使用 `FIN/.venv`，通过 `.pth` 继承了 `logcat_templatize/.venv` 的重包（含 CUDA 版 torch），并安装了 `matplotlib`、`torch-geometric`。详见 `requirements.txt`。
+
+---
+
+## 9. 当前基线结果（供对照）
+
+| 设定 | 测试集 MSE | MAE | R² | 备注 |
+|------|------------|-----|-----|------|
+| 代码格式未对齐（0 边，≈MLP） | ~0.0045 | ~0.058 | ~0.68 | 图未参与 |
+| 6 位对齐 + GCN（共用一张较密年图） | ~0.0061 | ~0.067 | ~0.56 | 图已接入，时间对齐仍粗 |
+
+结论：**最低目标「跑通」已完成**；要让图真正带来增益，还需按预测年使用对应年份的边（或更合理的动态图），并考虑真实违约标签评估。
+
+---
+
+## 10. 已知问题与后续方向
+
+1. **伪标签 ≠ 真实违约**：评估只能用回归指标；要做 AUC/KS 需 ST/退市/债违约等真值表。
+2. **KMV 实现偏简化**：缺数时有默认/近似，标签噪声大。
+3. **市场风险（GARCH）线未落地**：PPT 有、当前数据/代码无。
+4. **图与时间窗对齐**：legacy 用「整集最密年」拓扑（已废弃）；`src/current` 已改为「按预测年建图」，见 §12.3.1。
+5. **LLM Agent 增强**：见 `LLM增强TGC供应链风控_设计文档.md`（在保留 TGC 主干前提下增强特征/边/标签/反思）。
+
+---
+
+## 11. 速查：三个「是什么」
+
+| 问题 | 答案 |
+|------|------|
+| 数据是什么？ | 节点=公司年财务特征；边=供应链交易关系；标签=KMV 违约概率 |
+| 模型是什么？ | 时间门控卷积 +（可选）GCN，三年序列预测下一年概率 |
+| 输出是什么？ | 连续值「估计的违约概率」∈(0,1)，用于风险排序/预警，不是交易仓位 |
+
+---
+
+## 12. src/current 新架构（推荐入口，独立于 legacy）
+
+`src/current` 是从零重写、**不依赖 legacy 任何代码**的新实现：数据采集 / 格式转换 /
+KMV 伪标签 / TGC 训练预测端到端复现 legacy 效果，并用「注册表 + ABC 基类」预留了
+四类插入点，做到「加文件 + 注册」即可扩展。新采集/产出数据统一落在根目录 `repository/`。
+
+### 12.1 目录
+
+```
+src/current/
+├── config.py        # 路径(repository/)、.env token、特征列/窗口/切分年、各类超参
+├── registry.py      # 通用注册表：LABELERS / TEMPORAL_ENCODERS / VIZ_EXPORTERS / AGENT_HOOKS
+├── cli.py           # 入口：python -m src.current.cli {collect|edges|label|export|train|all}
+├── pipeline.py      # 编排：采集 -> 标签 -> 导出 -> 训练
+├── data/            # tushare_client(限流/重试/缓存) + financial + market + supply_chain
+├── transform/       # symbols(6位统一) + schema + exporter(→三张 parquet)
+├── labels/          # base(RiskLabeler) + kmv(P0) + market_garch(GARCH 插入点 stub)
+├── models/          # base(TemporalEncoder) + temporal(gated_conv默认/gru/lstm/transformer) + tgc
+├── train/           # dataset(3年窗口+建图) + trainer(训练/评估/预测/指标)
+├── viz/             # base(VizManager) + collectors(损失/散点/图快照) + neo4j_export(离线CSV)
+└── agents/          # base(4类增强hook) + noop(P0 占位)
+
+repository/          # 全部新数据在此
+├── raw/cache/       # 单次 Tushare 调用级 parquet 缓存（命中不耗额度，天然断点续跑）
+├── interim/         # financial/market/edges/labels 中间产物
+├── processed/       # nodes.parquet / edges.parquet / labels.parquet
+└── outputs/         # current_tgc_<时间戳>/  训练产物 + experiments_log.csv（跨 run 台账）
+```
+
+每个 `outputs/current_tgc_<时间戳>/` 目录含：`train_dataset.csv` / `test_dataset.csv` /
+`test_predictions.csv` / `training_loss.png` / `prediction_scatter.png` / `graph_*.csv`，
+以及 **`metrics.json`**——记录本次「实验配置（时序模型 / 建图方案 / 标签变换 / 超参）+ 数据规模 +
+全部测试指标」。同时每次训练会向 `outputs/experiments_log.csv` **追加一行**，用于换时序模型或建图方案时做**横向对比**。
+
+### 12.2 常用命令
+
+```powershell
+$env:PYTHONUTF8="1"
+# 全流程（采集会消耗 Tushare 额度，支持断点续跑）
+& ".\.venv\Scripts\python.exe" -m src.current.cli all
+# 分步
+& ".\.venv\Scripts\python.exe" -m src.current.cli edges     # 仅本地重建边（不耗额度）
+& ".\.venv\Scripts\python.exe" -m src.current.cli collect   # 采集财务+行情
+& ".\.venv\Scripts\python.exe" -m src.current.cli label     # 生成 KMV 标签
+& ".\.venv\Scripts\python.exe" -m src.current.cli export    # 导出三张 parquet
+& ".\.venv\Scripts\python.exe" -m src.current.cli train     # 训练+评估+2025推演
+```
+
+> Token 从根目录 `.env` 的 `TUSHARE_TOKEN` 读取。采集用滑动窗口限频（默认 120 次/分钟）
+> + 相邻请求最小间隔 + 命中限频自动退避；每次 API 调用结果按参数哈希缓存到
+> `repository/raw/cache/`，重跑只补缺失，不会重复消耗额度。
+
+### 12.3 四类插入点（“加文件 + 注册”即扩展）
+
+| 插入点 | 基类 / 注册表 | 现状 | 扩展方式 |
+|--------|---------------|------|----------|
+| 风险标签 | `labels/base.py` `RiskLabeler` / `LABELERS` | KMV(P0) + GARCH 市场风险(stub) | 新建 labeler 并 `@LABELERS.register`，加入 `config.LabelConfig.active_labelers` |
+| 时序模型 | `models/base.py` `TemporalEncoder` / `TEMPORAL_ENCODERS` | gated_conv 默认，另附 gru/lstm/transformer | 新建 encoder 注册后改 `config.ModelConfig.temporal_encoder` |
+| 绘图数据 | `viz/base.py` `VizExporter` / `VIZ_EXPORTERS` | 损失曲线/散点/图快照/Neo4j离线CSV | 新建 exporter 注册后加入 `config.VizConfig.active_exporters` |
+| Agent 集成 | `agents/base.py` `AgentHook` / `AGENT_HOOKS` | noop(P0)，四个增强hook占位 | 实现 hook 注册后在 `config.AgentConfig` 开启 |
+
+> 时序模型对应 `LLM增强TGC供应链风控_设计文档.md` 中「时序模块可替换」；
+> Agent 四个 hook 对应该文档四个增强点（特征/关系/标签/反思）。
+
+### 12.3.1 建图方案（已修正 legacy 缺陷）
+
+- **legacy 方案「整批共用最密年」拓扑已废弃（deprecated）**：`dataset.build_graph` 会为训练集、
+  测试集各自选「有效边最多的一年」，结果训练用 2013、测试用 2020 拓扑，图结构分布漂移，
+  是 R² 掉到负值的原因之一。该函数保留仅作对照，调用会触发 `DeprecationWarning`
+  （`config.model.graph_scheme="densest_legacy"` 可复现旧行为）。
+- **当前默认 `graph_scheme="pred_year"`**（`dataset.build_graph_by_pred_year`）：每个样本按
+  「预测年 − `graph_lag`(默认1)」取供应链边，做**分年块对角图**，训练/测试口径一致，
+  不同预测年样本互不串联。
+- **低方差应对**：`label_transform="logit"` 把挤在 0 附近的违约概率展开到实数域训练，
+  评估再 `sigmoid` 还原为概率；同时新增 **R²(logit)** 与排序指标 **Spearman / IC(Pearson)**
+  （指标含义见 §5.4.1；伪标签回归更看重排序）。
+- 效果对比（全量）：legacy 建图 R²(prob)≈**-0.64** → 现在 R²(prob)≈**-0.15~-0.26**、
+  **R²(logit)≈-0.15**、MSE≈0.003、**Spearman≈0.48 / IC≈0.37~0.41**。
+  R²(prob) 仍为负是因概率绝对方差极小（var≈0.002 ≈ MSE 量级）——这是 R² 对「小而偏」目标的固有局限，
+  **Spearman/IC 才是有效信号**（详见 §5.4.1）。
+
+### 12.4 与 legacy 一致性
+
+- 建模口径与 legacy 对齐：10 个财务特征、连续 3 年→第 4 年、训练预测年 2007–2020、
+  测试 2021–2024、2025 推演；样本级建图 + `log1p` 边权、边不足退回简化卷积；指标 MSE/MAE/R²。
+- 小样本冒烟（16 家公司 / 268 组合）：财务成功 212、KMV 标签 203、样本 131（训练 96/测试 33），
+  GCN 已启用，测试 **R²≈0.46 / MSE≈0.0029**，与 legacy 基线量级一致。全量数据（8910 组合）
+  采集完成后指标可进一步对齐 README 第 9 节。
+- 内网合规：Neo4j 插件只在本地生成离线 CSV（供 `neo4j-admin import`），不建立任何外部/公网连接。
