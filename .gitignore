@@ -8,3 +8,4 @@ outputs/
 src/legacy
 /data
 repository/
+/logs

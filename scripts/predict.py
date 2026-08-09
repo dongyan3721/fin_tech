@@ -121,6 +121,9 @@ def run_inference(ckpt: dict, X: np.ndarray, companies: list[str],
                   edges: pd.DataFrame, pred_year: int,
                   logit_space: bool = True) -> pd.DataFrame:
     """运行推理。"""
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"[device] {device}" + (f" ({torch.cuda.device_count()}x {torch.cuda.get_device_name(0)})" if device.type == "cuda" else ""))
+
     input_dim = ckpt["input_dim"]
     use_gcn = ckpt["use_gcn"]
     final_act = ckpt["final_activation"]
@@ -134,7 +137,7 @@ def run_inference(ckpt: dict, X: np.ndarray, companies: list[str],
     )
 
     model = TGCModel(input_dim=input_dim, cfg=mc, use_gcn=use_gcn,
-                     final_activation=final_act)
+                     final_activation=final_act).to(device)
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
 
@@ -143,13 +146,15 @@ def run_inference(ckpt: dict, X: np.ndarray, companies: list[str],
     n, t, f = X.shape
     X_scaled = (X.reshape(-1, f) - scaler_mean) / scaler_scale
     X_scaled = X_scaled.reshape(n, t, f)
-    x_tensor = torch.tensor(X_scaled, dtype=torch.float)
+    x_tensor = torch.tensor(X_scaled, dtype=torch.float, device=device)
 
     pred_years = [pred_year] * n
     ei, ew = build_graph_by_pred_year(edges, companies, pred_years, lag=1)
+    if ei is not None:
+        ei, ew = ei.to(device), ew.to(device)
 
     with torch.no_grad():
-        raw = model(x_tensor, ei, ew).numpy().flatten()
+        raw = model(x_tensor, ei, ew).cpu().numpy().flatten()
 
     if final_act == "identity":
         prob = _prob(raw)

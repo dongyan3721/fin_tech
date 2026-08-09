@@ -139,7 +139,6 @@ def print_config(cfg, args: argparse.Namespace) -> None:
     print(f"  标签变换:    {cfg.model.label_transform}")
     print(f"  建图方案:    {cfg.model.graph_scheme} (lag={cfg.model.graph_lag})")
     print(f"  Agent:       {'反思 Agent' if cfg.agent.enabled else '关闭'}")
-    print(f"  设备:        GPU x{__import__('torch').cuda.device_count() if __import__('torch').cuda.is_available() else 'CPU'}")
     print("=" * 60)
     print()
 

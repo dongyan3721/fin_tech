@@ -100,12 +100,17 @@ class Trainer:
 
         self._save_split_csv(bundle)
 
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        print(f"[train] 设备: {self.device}" + (f" ({torch.cuda.device_count()}x {torch.cuda.get_device_name(0)})" if self.device.type == "cuda" else ""))
+
         n, t, f = bundle.train.X.shape
         Xtr = self.scaler.fit_transform(bundle.train.X.reshape(-1, f)).reshape(n, t, f)
-        x_tr = torch.tensor(Xtr, dtype=torch.float)
-        y_tr = torch.tensor(self._to_train_target(bundle.train.y), dtype=torch.float).view(-1, 1)
+        x_tr = torch.tensor(Xtr, dtype=torch.float, device=self.device)
+        y_tr = torch.tensor(self._to_train_target(bundle.train.y), dtype=torch.float, device=self.device).view(-1, 1)
 
         tr_ei, tr_ew = self._build_graph(bundle.edges, bundle.train.companies, bundle.train.pred_years)
+        if tr_ei is not None:
+            tr_ei, tr_ew = tr_ei.to(self.device), tr_ew.to(self.device)
         use_gcn = tr_ei is not None
         print(f"[train] 建图方案={self.cfg.model.graph_scheme} | 标签变换={self.cfg.model.label_transform} | "
               f"模式: {'GCNConv(有图)' if use_gcn else '简化卷积(无图)'}")
@@ -114,7 +119,7 @@ class Trainer:
         # ========== 第一轮：均匀权重训练 ==========
         print("[train] === 第一轮训练（均匀权重）===")
         self.model = TGCModel(input_dim=f, cfg=self.cfg.model, use_gcn=use_gcn,
-                              final_activation=self._final_activation)
+                              final_activation=self._final_activation).to(self.device)
         losses_r1 = self._train_loop(x_tr, y_tr, tr_ei, tr_ew)
         self.viz.dispatch("training", {"losses": losses_r1}, self.out_dir)
 
@@ -255,7 +260,7 @@ class Trainer:
         self.model.train()
         use_weighted = sample_weight is not None
         if use_weighted:
-            w_t = torch.tensor(sample_weight, dtype=torch.float).view(-1, 1)
+            w_t = torch.tensor(sample_weight, dtype=torch.float, device=self.device).view(-1, 1)
         for epoch in range(self.cfg.model.epochs):
             opt.zero_grad()
             out = self.model(x, edge_index, edge_weight)
@@ -276,11 +281,13 @@ class Trainer:
         test = bundle.test
         n, t, f = test.X.shape
         Xte = self.scaler.transform(test.X.reshape(-1, f)).reshape(n, t, f)
-        x_te = torch.tensor(Xte, dtype=torch.float)
+        x_te = torch.tensor(Xte, dtype=torch.float, device=self.device)
         te_ei, te_ew = self._build_graph(bundle.edges, test.companies, test.pred_years)
+        if te_ei is not None:
+            te_ei, te_ew = te_ei.to(self.device), te_ew.to(self.device)
         self.model.eval()
         with torch.no_grad():
-            raw = self.model(x_te, te_ei, te_ew).numpy().flatten()
+            raw = self.model(x_te, te_ei, te_ew).cpu().numpy().flatten()
         pred = self._to_prob(raw)
         actual = test.y
 
@@ -312,13 +319,15 @@ class Trainer:
         fut = bundle.future
         n, t, f = fut.X.shape
         Xf = self.scaler.transform(fut.X.reshape(-1, f)).reshape(n, t, f)
-        x_f = torch.tensor(Xf, dtype=torch.float)
+        x_f = torch.tensor(Xf, dtype=torch.float, device=self.device)
         # 按预测年建图（2025），取 2025-lag 年的边结构
         pred_years = [2025] * n
         f_ei, f_ew = self._build_graph(bundle.edges, fut.companies, pred_years)
+        if f_ei is not None:
+            f_ei, f_ew = f_ei.to(self.device), f_ew.to(self.device)
         self.model.eval()
         with torch.no_grad():
-            raw = self.model(x_f, f_ei, f_ew).numpy().flatten()
+            raw = self.model(x_f, f_ei, f_ew).cpu().numpy().flatten()
         pred = self._to_prob(raw)
         out = pd.DataFrame({
             "symbol": fut.companies,
