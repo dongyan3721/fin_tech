@@ -55,7 +55,7 @@ class ModelConfig:
     hidden_dim: int = 64
     dropout: float = 0.3
     temporal_kernel: int = 3
-    epochs: int = 100
+    epochs: int = 300
     lr: float = 1e-3
     weight_decay: float = 1e-5
     min_edges_for_gcn: int = 10            # 样本级边数不足则退回简化卷积
@@ -77,11 +77,12 @@ class TushareConfig:
     """Tushare 采集节流参数。
 
     按账号额度这些接口可达约 500 次/分钟。这里的限频是“全局”跨接口计数；
-    财务阶段 balancesheet/income 交替、行情阶段 daily/daily_basic 交替，
-    故全局 480/分钟对单接口约 240/分钟，稳在 500 以内。
+    财务阶段 balancesheet/income 交替、行情阶段 daily/daily_basic 交替。
+    实测 480 QPM 会频繁触发账号侧限频（导致每次 60s 退避重试），
+    故降为 200 QPM，单接口约 100/分钟，稳妥不频繁触发限流。
     """
-    max_requests_per_minute: int = 480
-    min_interval_sec: float = 0.12         # 相邻请求最小间隔（60/480≈0.125）
+    max_requests_per_minute: int = 200
+    min_interval_sec: float = 0.3          # 相邻请求最小间隔（60/200=0.3）
     max_retries: int = 5
     retry_backoff_sec: float = 60.0        # 命中限频后的基础退避（按次数递增）
     request_timeout_hint: str = "tushare pro_api"
@@ -104,10 +105,25 @@ class VizConfig:
 
 
 @dataclass
+class ReflectionConfig:
+    """增强点 D：反思 Agent 配置。"""
+    enabled: bool = True
+    error_quantile: float = 0.3
+    max_weight_factor: float = 3.0
+    min_weight_factor: float = 0.3
+    year_weight_sensitivity: float = 0.5
+    conflict_threshold: float = 0.1
+    label_conflict_downweight: float = 0.5
+    llm_enabled: bool = True
+    label_verify_enabled: bool = True
+
+
+@dataclass
 class AgentConfig:
-    """Agent 集成插入点配置。P0 默认关闭（no-op）。"""
-    enabled: bool = False
-    hook: str = "noop"
+    """Agent 集成插入点配置。"""
+    enabled: bool = True
+    hook: str = "reflection"
+    reflection: ReflectionConfig = field(default_factory=ReflectionConfig)
 
 
 @dataclass
@@ -176,6 +192,15 @@ def get_tushare_token() -> str:
             "或设置同名环境变量。"
         )
     return token
+
+
+def get_llm_config() -> dict:
+    load_dotenv()
+    return {
+        "endpoint": os.getenv("SILICON_ENDPOINT", ""),
+        "api_key": os.getenv("SILICON_APIKEY", ""),
+        "model": os.getenv("SILICON_MODEL", ""),
+    }
 
 
 # 全局默认配置实例（其他模块直接 from src.current.config import CONFIG）

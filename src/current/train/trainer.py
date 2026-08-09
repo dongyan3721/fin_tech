@@ -46,13 +46,16 @@ def _safe_corr(func, a, b) -> float:
 
 
 class Trainer:
-    def __init__(self, config=CONFIG) -> None:
+    def __init__(self, config=CONFIG, run_name: Optional[str] = None) -> None:
         self.cfg = config
         self.scaler = StandardScaler()
         self.model: Optional[TGCModel] = None
         self.viz = VizManager()
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.out_dir: Path = self.cfg.outputs_dir / f"current_tgc_{ts}"
+        if run_name:
+            self.out_dir: Path = self.cfg.outputs_dir / run_name
+        else:
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            self.out_dir: Path = self.cfg.outputs_dir / f"current_tgc_{ts}"
         self.out_dir.mkdir(parents=True, exist_ok=True)
         self._agent = self._maybe_agent()
         # logit 标签变换开关（缓解低方差）
@@ -97,32 +100,72 @@ class Trainer:
 
         self._save_split_csv(bundle)
 
-        # 特征标准化（在训练集拟合）
         n, t, f = bundle.train.X.shape
         Xtr = self.scaler.fit_transform(bundle.train.X.reshape(-1, f)).reshape(n, t, f)
         x_tr = torch.tensor(Xtr, dtype=torch.float)
         y_tr = torch.tensor(self._to_train_target(bundle.train.y), dtype=torch.float).view(-1, 1)
 
-        # 训练集图（按预测年对齐）
         tr_ei, tr_ew = self._build_graph(bundle.edges, bundle.train.companies, bundle.train.pred_years)
         use_gcn = tr_ei is not None
         print(f"[train] 建图方案={self.cfg.model.graph_scheme} | 标签变换={self.cfg.model.label_transform} | "
               f"模式: {'GCNConv(有图)' if use_gcn else '简化卷积(无图)'}")
         self.viz.dispatch("graph", {"nodes": bundle.nodes, "edges": bundle.edges}, self.out_dir)
 
+        # ========== 第一轮：均匀权重训练 ==========
+        print("[train] === 第一轮训练（均匀权重）===")
         self.model = TGCModel(input_dim=f, cfg=self.cfg.model, use_gcn=use_gcn,
                               final_activation=self._final_activation)
-        losses = self._train_loop(x_tr, y_tr, tr_ei, tr_ew)
-        self.viz.dispatch("training", {"losses": losses}, self.out_dir)
+        losses_r1 = self._train_loop(x_tr, y_tr, tr_ei, tr_ew)
+        self.viz.dispatch("training", {"losses": losses_r1}, self.out_dir)
 
-        metrics = {}
+        metrics_r1 = {}
+        test_preds_r1 = None
         if len(bundle.test.X) > 0:
-            metrics = self._evaluate(bundle)
+            metrics_r1, test_preds_r1 = self._evaluate(bundle)
+
+        # ========== 第二轮：反思 Agent 加权重训 ==========
+        reflection_result = None
+        has_reflection = (
+            self._agent is not None
+            and self.cfg.agent.reflection.enabled
+            and test_preds_r1 is not None
+            and hasattr(self._agent, "reflect")
+        )
+
+        if has_reflection:
+            print("\n[train] === 反思 Agent 分析 ===")
+            reflection_result = self._agent.reflect(
+                test_preds=test_preds_r1,
+                nodes=bundle.nodes,
+                edges=bundle.edges,
+                feature_columns=bundle.feature_columns,
+                bundle=bundle,
+            )
+            sample_weights = reflection_result["weights"]
+
+            reflection_report = reflection_result.get("report", {})
+            report_path = self.out_dir / "reflection_report.json"
+            report_path.write_text(
+                json.dumps(reflection_report, ensure_ascii=False, indent=2, default=str),
+                encoding="utf-8",
+            )
+            print(f"[reflection] 报告已保存: {report_path}")
+
+            print("\n[train] === 第二轮训练（反思加权）===")
+            self.model = TGCModel(input_dim=f, cfg=self.cfg.model, use_gcn=use_gcn,
+                                  final_activation=self._final_activation)
+            losses_r2 = self._train_loop(x_tr, y_tr, tr_ei, tr_ew,
+                                         sample_weight=sample_weights)
+
+            metrics = {}
+            if len(bundle.test.X) > 0:
+                metrics, test_preds = self._evaluate(bundle)
+        else:
+            metrics = metrics_r1
+            losses_r2 = losses_r1
+
         if bundle.future is not None:
             self._predict_future(bundle)
-
-        if self._agent is not None:
-            self._agent.reflect(metrics)
 
         run_info = {
             "n_train": int(len(bundle.train.X)),
@@ -130,12 +173,43 @@ class Trainer:
             "n_future": int(len(bundle.future.X)) if bundle.future is not None else 0,
             "use_gcn": bool(use_gcn),
             "train_sample_edges": int(tr_ei.shape[1]) if tr_ei is not None else 0,
-            "final_train_loss": float(losses[-1]) if losses else None,
+            "final_train_loss": float(losses_r2[-1]) if losses_r2 else None,
+            "reflection_enabled": has_reflection,
         }
+
+        if has_reflection and metrics_r1:
+            run_info["r1_spearman"] = metrics_r1.get("spearman")
+            run_info["r1_mae"] = metrics_r1.get("mae")
+            run_info["r1_r2"] = metrics_r1.get("r2")
+            if reflection_result and "metrics" in reflection_result:
+                run_info["reflection_mae"] = reflection_result["metrics"].get("mean_abs_error")
+
         self._save_metrics(metrics, run_info)
+        self._save_checkpoint(bundle, use_gcn, f)
 
         print(f"[train] 全部产物已保存到: {self.out_dir}")
         return {"out_dir": str(self.out_dir), **metrics}
+
+    def _save_checkpoint(self, bundle: DatasetBundle, use_gcn: bool, input_dim: int) -> None:
+        """保存模型 checkpoint，供推理脚本加载。"""
+        ckpt = {
+            "model_state_dict": self.model.state_dict(),
+            "scaler_mean": self.scaler.mean_.tolist(),
+            "scaler_scale": self.scaler.scale_.tolist(),
+            "input_dim": input_dim,
+            "use_gcn": use_gcn,
+            "final_activation": self._final_activation,
+            "feature_columns": bundle.feature_columns,
+            "model_config": {
+                "temporal_encoder": self.cfg.model.temporal_encoder,
+                "hidden_dim": self.cfg.model.hidden_dim,
+                "dropout": self.cfg.model.dropout,
+                "temporal_kernel": self.cfg.model.temporal_kernel,
+            },
+        }
+        ckpt_path = self.out_dir / "model_checkpoint.pt"
+        torch.save(ckpt, ckpt_path)
+        print(f"[checkpoint] 模型已保存: {ckpt_path}")
 
     def _save_metrics(self, metrics: dict, run_info: dict) -> None:
         """把本次实验的「配置 + 数据规模 + 指标」落盘为 metrics.json，
@@ -173,24 +247,32 @@ class Trainer:
             row.to_csv(ledger, index=False, encoding="utf-8-sig")
         print(f"[metrics] 已写入 {self.out_dir / 'metrics.json'}；台账 {ledger}")
 
-    def _train_loop(self, x, y, edge_index, edge_weight):
+    def _train_loop(self, x, y, edge_index, edge_weight,
+                    sample_weight: Optional[np.ndarray] = None):
         opt = torch.optim.Adam(self.model.parameters(), lr=self.cfg.model.lr,
                                weight_decay=self.cfg.model.weight_decay)
-        crit = nn.MSELoss()
         losses = []
         self.model.train()
+        use_weighted = sample_weight is not None
+        if use_weighted:
+            w_t = torch.tensor(sample_weight, dtype=torch.float).view(-1, 1)
         for epoch in range(self.cfg.model.epochs):
             opt.zero_grad()
             out = self.model(x, edge_index, edge_weight)
-            loss = crit(out, y)
+            if use_weighted:
+                per_sample = (out - y).pow(2)
+                loss = (per_sample * w_t).mean()
+            else:
+                loss = nn.functional.mse_loss(out, y)
             loss.backward()
             opt.step()
             losses.append(float(loss.item()))
             if epoch % 50 == 0:
-                print(f"[train] epoch {epoch}: loss={loss.item():.6f}")
+                tag = "R2" if use_weighted else ""
+                print(f"[train{tag}] epoch {epoch}: loss={loss.item():.6f}")
         return losses
 
-    def _evaluate(self, bundle: DatasetBundle) -> dict:
+    def _evaluate(self, bundle: DatasetBundle) -> tuple[dict, pd.DataFrame]:
         test = bundle.test
         n, t, f = test.X.shape
         Xte = self.scaler.transform(test.X.reshape(-1, f)).reshape(n, t, f)
@@ -199,16 +281,14 @@ class Trainer:
         self.model.eval()
         with torch.no_grad():
             raw = self.model(x_te, te_ei, te_ew).numpy().flatten()
-        pred = self._to_prob(raw)           # 还原到概率空间，指标口径与 legacy 可比
+        pred = self._to_prob(raw)
         actual = test.y
 
         mse = mean_squared_error(actual, pred)
-        rmse = float(np.sqrt(mse))          # 量纲与概率一致，比 MSE 直观、比 MAE 更惩罚大误差
+        rmse = float(np.sqrt(mse))
         mae = mean_absolute_error(actual, pred)
         r2 = r2_score(actual, pred)
-        # 对数几率空间 R²：把挤在 0 附近的概率展开后再算，避免绝对尺度过小导致 R² 天然偏负
         r2_logit = r2_score(_logit(actual), _logit(pred))
-        # 伪标签任务更看重排序能力：Spearman(rank IC) 与 Pearson(IC)
         spearman = _safe_corr(spearmanr, actual, pred)
         ic = _safe_corr(pearsonr, actual, pred)
         print(f"[eval] 测试集 MSE={mse:.6f} RMSE={rmse:.6f} MAE={mae:.6f} R2(prob)={r2:.4f} "
@@ -223,9 +303,10 @@ class Trainer:
         })
         results.to_csv(self.out_dir / "test_predictions.csv", index=False, encoding="utf-8-sig")
         self.viz.dispatch("evaluation", {"results": results}, self.out_dir)
-        return {"mse": float(mse), "rmse": rmse, "mae": float(mae), "r2": float(r2),
+        metrics = {"mse": float(mse), "rmse": rmse, "mae": float(mae), "r2": float(r2),
                 "r2_logit": float(r2_logit), "spearman": float(spearman),
                 "ic": float(ic), "n_test": int(n)}
+        return metrics, results
 
     def _predict_future(self, bundle: DatasetBundle) -> None:
         fut = bundle.future

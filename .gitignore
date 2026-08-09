@@ -6,5 +6,5 @@ outputs/
 .idea/
 2-过程部分数据/
 src/legacy
-data
+/data
 repository/
