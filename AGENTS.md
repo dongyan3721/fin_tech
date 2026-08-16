@@ -41,6 +41,7 @@
 - 数据整合脚本：`scripts/merge_supply_data.py` → 输出到 `data/raw/整合的供应链数据.xlsx`
 - Tushare 限频：200 QPM（低于此值易触发账号侧限流导致 60s 退避）
 - 产出目录：`repository/{raw,interim,processed,outputs}/`
+- 默认训练轮数：500 epoch（通过 0-2000 轮搜索确定，R² 峰值 0.146）
 
 ## 增强点 D：反思 Agent（Reflection Agent）
 - 实现文件：`src/current/agents/reflection.py`

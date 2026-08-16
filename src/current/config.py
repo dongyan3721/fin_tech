@@ -55,7 +55,7 @@ class ModelConfig:
     hidden_dim: int = 64
     dropout: float = 0.3
     temporal_kernel: int = 3
-    epochs: int = 300
+    epochs: int = 500                # 最优训练轮数（通过 0-2000 轮搜索确定）
     lr: float = 1e-3
     weight_decay: float = 1e-5
     min_edges_for_gcn: int = 10            # 样本级边数不足则退回简化卷积
@@ -93,9 +93,12 @@ class TushareConfig:
 class LabelConfig:
     """标签生成配置。active_labelers 决定启用哪些风险标签插入点。"""
     active_labelers: list[str] = field(default_factory=lambda: ["kmv"])
-    default_point_ratio: float = 0.7       # KMV 违约点 = 总负债 × 该比例
-    min_asset_volatility: float = 0.1
+    default_point_ratio: float = 0.7       # KMV 违约点 = 总负债 × 该比例（简化版）
+    min_asset_volatility: float = 0.3      # 资产波动率下限（提高到 0.3 缓解标签集中）
     fallback_volatility: float = 0.3
+    risk_free_rate: float = 0.025          # 无风险利率（10 年期国债收益率，用于标准 KMV）
+    kmv_time_horizon: float = 1.0          # KMV 时间 horizon T（年）
+    kmv_use_iterative: bool = False        # 简化版（迭代版会压缩标签分布，效果差）
 
 
 @dataclass

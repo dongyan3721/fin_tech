@@ -23,7 +23,8 @@ _INCOME_FIELDS = "revenue,operate_profit,fin_exp"
 _COLUMNS = [
     "symbol", "year", "ts_code", "data_status",
     "debt_to_asset_ratio", "current_ratio", "quick_ratio", "interest_coverage_ratio",
-    "total_assets", "total_liab", "current_assets", "current_liab", "revenue", "operate_profit",
+    "total_assets", "total_liab", "total_cur_liab",
+    "current_assets", "current_liab", "revenue", "operate_profit",
     "inventory", "fin_exp",
 ]
 
@@ -39,7 +40,7 @@ def _ratios(bs: pd.DataFrame, inc: pd.DataFrame, symbol: str, year: int, ts_code
     total_assets = _first(bs, "total_assets")
     total_liab = _first(bs, "total_liab")
     current_assets = _first(bs, "total_cur_assets")
-    current_liab = _first(bs, "total_cur_liab")
+    total_cur_liab = _first(bs, "total_cur_liab")  # 流动负债（用于 KMV DPT 计算）
     inventory = _first(bs, "inventories")
     revenue = _first(inc, "revenue")
     operate_profit = _first(inc, "operate_profit")
@@ -47,10 +48,11 @@ def _ratios(bs: pd.DataFrame, inc: pd.DataFrame, symbol: str, year: int, ts_code
 
     rec = {
         "symbol": symbol, "year": year, "ts_code": ts_code, "data_status": "success", "total_assets": total_assets,
-        "total_liab": total_liab, "current_assets": current_assets, "current_liab": current_liab, "revenue": revenue,
+        "total_liab": total_liab, "total_cur_liab": total_cur_liab,
+        "current_assets": current_assets, "current_liab": total_cur_liab, "revenue": revenue,
         "operate_profit": operate_profit, "inventory": inventory, "fin_exp": fin_exp,
         "debt_to_asset_ratio": (total_liab / total_assets) if (pd.notna(total_assets) and total_assets) else np.nan,
-        "current_ratio": (current_assets / current_liab) if (pd.notna(current_liab) and current_liab) else np.nan
+        "current_ratio": (current_assets / total_cur_liab) if (pd.notna(total_cur_liab) and total_cur_liab) else np.nan
     }
 
     if pd.notna(current_liab) and current_liab and pd.notna(current_assets):

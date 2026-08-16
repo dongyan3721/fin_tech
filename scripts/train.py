@@ -80,7 +80,7 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
-    p.add_argument("--epochs", type=int, default=300, help="训练轮数 (default: 300)")
+    p.add_argument("--epochs", type=int, default=500, help="训练轮数 (default: 500)")
     p.add_argument("--lr", type=float, default=1e-3, help="学习率 (default: 0.001)")
     p.add_argument("--weight-decay", type=float, default=1e-5, help="L2 正则化 (default: 1e-5)")
     p.add_argument("--hidden-dim", type=int, default=64, help="隐藏层维度 (default: 64)")
@@ -96,6 +96,8 @@ def parse_args() -> argparse.Namespace:
 
     p.add_argument("--name", type=str, default=None,
                    help="自定义输出目录名（如 exp_gru_baseline）")
+    p.add_argument("--eval-every", type=int, default=100,
+                   help="每 N 轮评估一次并保存最佳模型 (0=不评估, default: 100)")
     p.add_argument("--no-resume", action="store_true", help="采集时不使用断点续跑")
     p.add_argument("--log", type=str, default=None, help="日志输出文件路径")
 
@@ -139,6 +141,7 @@ def print_config(cfg, args: argparse.Namespace) -> None:
     print(f"  标签变换:    {cfg.model.label_transform}")
     print(f"  建图方案:    {cfg.model.graph_scheme} (lag={cfg.model.graph_lag})")
     print(f"  Agent:       {'反思 Agent' if cfg.agent.enabled else '关闭'}")
+    print(f"  评估间隔:    {args.eval_every} 轮" if args.eval_every > 0 else "  评估间隔:    关闭")
     print("=" * 60)
     print()
 
@@ -157,6 +160,9 @@ def print_metrics(metrics: dict, prefix: str = "") -> None:
     print(f"  Spearman:    {metrics.get('spearman', 0):.4f}")
     print(f"  IC(Pearson): {metrics.get('ic', 0):.4f}")
     print(f"  测试样本数:  {metrics.get('n_test', 0)}")
+    if 'rating_accuracy' in metrics:
+        print(f"  评级准确率:  {metrics.get('rating_accuracy', 0):.3f} "
+              f"({metrics.get('rating_correct', 0)}/{metrics.get('rating_total', 0)})")
     print("-" * 40)
 
 
@@ -179,7 +185,7 @@ def main() -> int:
 
     from src.current.train.trainer import Trainer
 
-    trainer = Trainer(config=cfg, run_name=args.name)
+    trainer = Trainer(config=cfg, run_name=args.name, eval_every=args.eval_every)
     result = trainer.run()
 
     print("\n" + "=" * 60)
