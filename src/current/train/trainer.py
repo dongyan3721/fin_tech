@@ -16,7 +16,7 @@ import pandas as pd
 import torch
 import torch.nn as nn
 from scipy.stats import pearsonr, spearmanr
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score, roc_auc_score
 from sklearn.preprocessing import StandardScaler
 
 from src.current.config import CONFIG
@@ -305,6 +305,7 @@ class Trainer:
             "graph_scheme": m.graph_scheme,
             "graph_lag": m.graph_lag,
             "label_transform": m.label_transform,
+            "active_labelers": list(self.cfg.labels.active_labelers),
             "hidden_dim": m.hidden_dim,
             "dropout": m.dropout,
             "temporal_kernel": m.temporal_kernel,
@@ -407,8 +408,22 @@ class Trainer:
         # 评级分类准确性
         rating_acc = _rating_accuracy(actual, pred)
 
+        # 二分类判别能力：AUC / KS（违约 = default_probability >= 0.5，对应 ST/*ST 事件）
+        bin_y = (actual >= 0.5).astype(int)
+        n_pos = int(bin_y.sum())
+        auc = None
+        ks = None
+        if 2 <= n_pos <= n - 2:
+            auc = float(roc_auc_score(bin_y, pred))
+            order = np.argsort(pred)
+            cpos = np.cumsum(bin_y[order]) / n_pos
+            cneg = np.cumsum(1 - bin_y[order]) / (n - n_pos)
+            ks = float(np.max(np.abs(cpos - cneg)))
+
         print(f"[eval] 测试集 MSE={mse:.6f} RMSE={rmse:.6f} MAE={mae:.6f} R2(prob)={r2:.4f} "
               f"R2(logit)={r2_logit:.4f} Spearman={spearman:.4f} IC(Pearson)={ic:.4f}")
+        if auc is not None:
+            print(f"[eval] 判别力: AUC={auc:.4f} KS={ks:.4f}（违约阈值>=0.5，正样本 {n_pos}/{n}）")
         print(f"[eval] 评级准确性: {rating_acc['rating_accuracy']:.3f} "
               f"({rating_acc['correct_predictions']}/{rating_acc['total_samples']})")
         if rating_acc['per_class']:
@@ -429,6 +444,7 @@ class Trainer:
         metrics = {"mse": float(mse), "rmse": rmse, "mae": float(mae), "r2": float(r2),
                 "r2_logit": float(r2_logit), "spearman": float(spearman),
                 "ic": float(ic), "n_test": int(n),
+                "auc": auc, "ks": ks, "n_default": n_pos,
                 "rating_accuracy": float(rating_acc['rating_accuracy']),
                 "rating_correct": int(rating_acc['correct_predictions']),
                 "rating_total": int(rating_acc['total_samples']),

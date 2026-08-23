@@ -159,6 +159,9 @@ def print_metrics(metrics: dict, prefix: str = "") -> None:
     print(f"  R²(logit):   {metrics.get('r2_logit', 0):.4f}")
     print(f"  Spearman:    {metrics.get('spearman', 0):.4f}")
     print(f"  IC(Pearson): {metrics.get('ic', 0):.4f}")
+    if metrics.get('auc') is not None:
+        print(f"  AUC:         {metrics.get('auc', 0):.4f}")
+        print(f"  KS:          {metrics.get('ks', 0):.4f}  (违约样本 {metrics.get('n_default', 0)})")
     print(f"  测试样本数:  {metrics.get('n_test', 0)}")
     if 'rating_accuracy' in metrics:
         print(f"  评级准确率:  {metrics.get('rating_accuracy', 0):.3f} "

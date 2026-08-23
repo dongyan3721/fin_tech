@@ -6,6 +6,7 @@
 """
 from src.current.labels import kmv  # noqa: F401  触发注册
 from src.current.labels import market_garch  # noqa: F401  触发注册（插入点 stub）
+from src.current.labels import st  # noqa: F401  触发注册（方案D ST/退市事件）
 from src.current.labels.base import RiskLabeler, generate_labels
 
 __all__ = ["RiskLabeler", "generate_labels"]

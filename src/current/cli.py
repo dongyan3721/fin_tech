@@ -33,7 +33,7 @@ def _redirect_logs(path: str) -> None:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="供应链金融风控 current 流水线")
     parser.add_argument("command",
-                        choices=["collect", "edges", "label", "export", "train", "predict", "all"],
+                        choices=["collect", "edges", "events", "label", "export", "train", "predict", "all"],
                         help="要执行的阶段")
     parser.add_argument("--no-resume", action="store_true", help="采集时不使用断点续跑")
     parser.add_argument("--log", metavar="FILE", default=None,
@@ -50,6 +50,8 @@ def main(argv=None) -> int:
         pipeline.step_collect(resume=resume)
     elif cmd == "edges":
         pipeline.step_edges_only()
+    elif cmd == "events":
+        pipeline.step_events(resume=resume)
     elif cmd == "label":
         pipeline.step_label()
     elif cmd == "export":

@@ -10,11 +10,12 @@ from src.current.config import CONFIG
 
 
 def step_collect(resume: bool = True) -> None:
-    """采集供应链边 + 财务特征 + 行情（后两者消耗 Tushare 额度）。"""
+    """采集供应链边 + 财务特征 + 行情 + 风险事件（后三者消耗 Tushare 额度）。"""
     from src.current.data import supply_chain
     from src.current.data.financial import FinancialCollector
     from src.current.data.market import MarketCollector
     from src.current.data.tushare_client import TushareClient
+    from src.current.data.events import EventCollector
 
     print("=== [collect] 供应链边 ===")
     edges = supply_chain.collect_edges()
@@ -22,13 +23,16 @@ def step_collect(resume: bool = True) -> None:
     print(f"[collect] edges: {len(edges)} 行 -> {CONFIG.edges_interim}")
 
     combos = supply_chain.collect_symbol_year_universe()
-    print(f"[collect] 需采集 (symbol, year) 全集: {len(combos)}")
+    symbols = sorted({s for s, _ in combos})
+    print(f"[collect] 需采集 (symbol, year) 全集: {len(combos)}；去重公司 {len(symbols)} 家")
 
     client = TushareClient()
     print("=== [collect] 财务特征 ===")
     FinancialCollector(client).collect(combos, resume=resume)
     print("=== [collect] 行情（KMV 所需）===")
     MarketCollector(client).collect(combos, resume=resume)
+    print("=== [collect] 风险事件（ST/退市，方案D 混合标签真值）===")
+    EventCollector(client).collect(symbols, resume=resume)
 
 
 def step_edges_only() -> None:
@@ -37,6 +41,17 @@ def step_edges_only() -> None:
     edges = supply_chain.collect_edges()
     edges.to_parquet(CONFIG.edges_interim, index=False)
     print(f"[collect] edges: {len(edges)} 行 -> {CONFIG.edges_interim}")
+
+
+def step_events(resume: bool = True) -> None:
+    """仅采集风险事件（ST 状态 namechange + 退市 stock_basic）。消耗 Tushare 额度。"""
+    from src.current.data import supply_chain
+    from src.current.data.tushare_client import TushareClient
+    from src.current.data.events import EventCollector
+
+    combos = supply_chain.collect_symbol_year_universe()
+    symbols = sorted({s for s, _ in combos})
+    EventCollector(TushareClient()).collect(symbols, resume=resume)
 
 
 def step_label() -> pd.DataFrame:
