@@ -1,21 +1,25 @@
-"""风险标签插入点：RiskLabeler 抽象基类 + 多标签合并入口。
+"""风险标签插入点：底层 RiskLabeler + 可配置的标签方案 LabelScheme。
 
-一个 labeler 消费 LabelContext（财务/行情等 interim 数据），产出以
-(symbol, year) 为主键、携带一个或多个标签列的 DataFrame。generate_labels 会把
-config 中启用的所有 labeler 结果按主键外连接合并，写入 interim/labels.parquet。
+两个层次的抽象（与「时序模型」完全同构）：
+1. ``RiskLabeler`` —— 底层标签器（kmv / st / market_garch），产出单个或少数标签列。
+   用 ``@LABELERS.register("<name>")`` 注册，供标签方案组合复用。
+2. ``LabelScheme`` —— 标签方案（可配置对象）：组合底层 labeler 并做后处理，产出
+   最终标签表。用 ``@LABEL_SCHEMES.register("<name>")`` 注册，在
+   ``config.LabelConfig.label_scheme`` 切换（默认 "kmv" = 基线简化 KMV，
+   "hybrid" = 方案D 混合标签）。
+
+generate_labels 会按 config 选中的方案生成标签，统一写 interim/labels.parquet。
 """
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from functools import reduce
-from typing import List, Optional
+from typing import Optional
 
-import numpy as np
 import pandas as pd
 
 from src.current.config import CONFIG
-from src.current.registry import LABELERS
+from src.current.registry import LABEL_SCHEMES
 
 
 @dataclass
@@ -36,6 +40,19 @@ class RiskLabeler(ABC):
         raise NotImplementedError
 
 
+class LabelScheme(ABC):
+    """标签方案插入点：组合底层 labeler + 后处理，产出最终标签表。
+
+    约定：返回含 [symbol, year, <标签列...>] 的 DataFrame，其中必须包含
+    ``CONFIG.label_column``（default_probability）。类似时序模型
+    ``TemporalEncoder``，新增方案继承本类并 ``@LABEL_SCHEMES.register("<name>")``。
+    """
+
+    @abstractmethod
+    def generate(self, ctx: LabelContext) -> pd.DataFrame:
+        raise NotImplementedError
+
+
 def _load_context() -> LabelContext:
     financial = pd.read_parquet(CONFIG.financial_interim)
     market = None
@@ -47,54 +64,30 @@ def _load_context() -> LabelContext:
     return LabelContext(financial=financial, market=market, events=events)
 
 
-def generate_labels(active: Optional[List[str]] = None) -> pd.DataFrame:
-    active = active or CONFIG.labels.active_labelers
+def generate_labels(scheme: Optional[str] = None) -> pd.DataFrame:
+    """按 config.LabelConfig.label_scheme 生成最终标签并落盘 interim/labels.parquet。
+
+    Args:
+        scheme: 标签方案注册名（None 则用 config 默认）。
+    """
+    name = scheme or CONFIG.labels.label_scheme
     ctx = _load_context()
 
-    frames: List[pd.DataFrame] = []
-    for name in active:
-        labeler: RiskLabeler = LABELERS.create(name)
-        df = labeler.generate(ctx)
-        if df is None or df.empty:
-            print(f"[labels] {name}: 无输出（可能为未实现的插入点），跳过")
-            continue
-        df["symbol"] = df["symbol"].astype(str)
-        df["year"] = df["year"].astype(int)
-        frames.append(df)
-        print(f"[labels] {name}: {len(df)} 行，列={[c for c in df.columns if c not in ('symbol','year')]}")
+    try:
+        label_scheme: LabelScheme = LABEL_SCHEMES.create(name)
+    except KeyError:
+        raise KeyError(
+            f"[labels] 未注册的标签方案: {name!r}。已注册: {sorted(LABEL_SCHEMES.keys())}"
+        ) from None
 
-    if not frames:
-        raise RuntimeError("没有任何 labeler 产出标签，无法继续。请检查 active_labelers。")
+    merged = label_scheme.generate(ctx)
+    if merged is None or merged.empty:
+        raise RuntimeError(f"[labels] 方案 {name!r} 无输出，无法继续。")
 
-    merged = reduce(lambda a, b: pd.merge(a, b, on=["symbol", "year"], how="outer"), frames)
-
-    # ---- 方案D：混合标签 ----
-    # 若同时存在 KMV 标签(default_probability)与事件概率(event_probability)，
-    # 则 default_probability = max(KMV, 事件概率)：ST/*ST/失败退市只上调风险、不下调。
-    if "event_probability" in merged.columns and CONFIG.label_column in merged.columns:
-        base = pd.to_numeric(merged[CONFIG.label_column], errors="coerce")
-        ev = pd.to_numeric(merged["event_probability"], errors="coerce")
-        mask = base.notna() & ev.notna() & (ev > 0)
-        if mask.any():
-            from src.current.labels.kmv import _risk_rating
-            merged.loc[mask, CONFIG.label_column] = np.maximum(base[mask], ev[mask])
-            if "risk_rating" in merged.columns:
-                prb = pd.to_numeric(merged[CONFIG.label_column], errors="coerce")
-                merged["risk_rating"] = [ _risk_rating(float(x)) if pd.notna(x) else None
-                                          for x in prb ]
-            merged["label_source"] = "kmv"
-            merged.loc[mask, "label_source"] = "mixed"
-            n_mixed = int(mask.sum())
-            n_up = int((base[mask] < ev[mask]).sum())
-        else:
-            merged["label_source"] = "kmv"
-            n_mixed, n_up = 0, 0
-        merged.loc[merged[CONFIG.label_column].notna() & merged["label_source"].isna(),
-                   "label_source"] = "kmv"
-        # 事件概率已并入 default_probability，删除中间列避免混淆
-        merged = merged.drop(columns=["event_probability"])
-        print(f"[labels] 混合标签：{n_mixed} 行含事件，其中 {n_up} 行走高概率（max(KMV,事件)）")
+    merged = merged.copy()
+    merged["symbol"] = merged["symbol"].astype(str)
+    merged["year"] = merged["year"].astype(int)
 
     merged.to_parquet(CONFIG.labels_interim, index=False)
-    print(f"[labels] 合并后 {len(merged)} 行 -> {CONFIG.labels_interim}")
+    print(f"[labels] 方案 {name!r}：{len(merged)} 行 -> {CONFIG.labels_interim}")
     return merged

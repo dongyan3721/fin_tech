@@ -91,11 +91,11 @@ class TushareConfig:
 
 @dataclass
 class LabelConfig:
-    """标签生成配置。active_labelers 决定启用哪些风险标签插入点。"""
-    # 混合标签（方案D）：["kmv", "st"] 时，用 ST/退市事件软修正 KMV 标签
-    # （default_probability = max(KMV, 事件概率)，事件只上调不下调）。
-    # 仅 ["kmv"] 可复现纯 KMV 基线。
-    active_labelers: list[str] = field(default_factory=lambda: ["kmv", "st"])
+    """标签生成配置。label_scheme 选择标签方案（见 labels/schemes.py 注册名）。"""
+    # 标签方案：
+    #   "kmv"    —— 基线：简化版 KMV 违约概率（无事件混合）
+    #   "hybrid" —— 方案D：default_probability = max(KMV, ST/退市事件概率)
+    label_scheme: str = "kmv"
     default_point_ratio: float = 0.7       # KMV 违约点 = 总负债 × 该比例（简化版）
     min_asset_volatility: float = 0.3      # 资产波动率下限（提高到 0.3 缓解标签集中）
     fallback_volatility: float = 0.3
@@ -103,7 +103,7 @@ class LabelConfig:
     kmv_time_horizon: float = 1.0          # KMV 时间 horizon T（年）
     kmv_use_iterative: bool = False        # 简化版（迭代版会压缩标签分布，效果差）
 
-    # —— 方案D：混合标签事件概率 ——
+    # —— 方案D：混合标签事件概率（仅 label_scheme="hybrid" 时使用）——
     st_probability: float = 0.65           # 年度处于 ST 的违约概率（对标评级 B~CCC 之间）
     star_st_probability: float = 0.85      # 年度处于 *ST（退市风险警示）
     delist_probability: float = 0.9        # 年度退市（仅 ST/*ST 前缀的失败退市）

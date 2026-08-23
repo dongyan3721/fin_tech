@@ -305,7 +305,7 @@ class Trainer:
             "graph_scheme": m.graph_scheme,
             "graph_lag": m.graph_lag,
             "label_transform": m.label_transform,
-            "active_labelers": list(self.cfg.labels.active_labelers),
+            "label_scheme": self.cfg.labels.label_scheme,
             "hidden_dim": m.hidden_dim,
             "dropout": m.dropout,
             "temporal_kernel": m.temporal_kernel,

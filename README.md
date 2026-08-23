@@ -256,7 +256,7 @@ def forward(X, edge_index, edge_weight):
 ```python
 loss = MSE(y_hat, y_kmv)     # 拟合伪标签（src/current 默认在 logit 空间做 MSE）
 # 测试集报告: MSE / MAE / R²(prob) / R²(logit) / Spearman / IC(Pearson)
-# 尚无真实 0/1 违约标签 → 不算 AUC / KS / F1
+# 混合标签(hydrid)下额外报告 AUC / KS（以 default_probability >= 0.5 为“违约”）
 ```
 
 **最终目标**：让模型输出的违约概率 `y_hat` 尽量贴合 KMV 算出的违约概率 `y_kmv`（伪标签）。
@@ -273,6 +273,8 @@ loss = MSE(y_hat, y_kmv)     # 拟合伪标签（src/current 默认在 logit 空
 | **R²(logit)** | 在**对数几率空间**算的同一个 R² | 越接近 1 越好，可为负 | 先把概率 `p` 变换成 `logit(p)=ln(p/(1−p))`，把挤在 0 附近的值展开到实数域再比。消除了「绝对尺度过小」的干扰，比 R²(prob) 更能反映真实拟合质量，也是训练实际优化的空间。 |
 | **Spearman（Rank IC）** | 预测与真实的**秩相关**（名次是否一致） | 越接近 1 越好，∈[−1,1] | 只看**排序**：模型是否把 KMV 认为更危险的公司也排在更前面。不受概率绝对尺度影响，是本任务**最稳、最贴合业务**的指标（风控关心的是「谁更该收紧额度」）。 |
 | **IC（Pearson）** | 预测与真实的**线性相关系数** | 越接近 1 越好，∈[−1,1] | 金融里 IC(Information Coefficient) 指「预测值对真实值的信息含量」。这里用 Pearson，衡量二者**线性同向变动**的强弱；与 Spearman 配合看：IC 高=数值线性相关强，Spearman 高=名次一致强。 |
+| **AUC** | 二分类判别能力：把 `default_probability ≥ 0.5` 视为「违约」后，预测概率能否区分违约/非违约 | 越接近 1 越好，0.5=随机 | 仅在**混合标签（`hybrid`）**下有真实正样本（ST/*ST 被抬高到 0.65/0.85）才有意义；纯 KMV 标签几乎无 ≥0.5 样本，此时输出 `None` 跳过。 |
+| **KS** | 预测概率对违约/非违约两组的最大区分度（累计分布最大间隔） | 越大越好，∈[0,1] | 与 AUC 同源：KS ≈ 0 表示模型无法把违约样本排在前面；仅混合标签下有意义。 |
 
 **为什么强调 Spearman / IC**：真实违约标签缺失，KMV 概率只是**伪标签**，其绝对数值本身就有噪声、且尺度很小。
 在这种情况下，「把高风险户排在前面」（排序正确）比「概率数值分毫不差」更有业务价值，也更能抗伪标签噪声。
@@ -357,7 +359,7 @@ $env:PYTHONUTF8="1"
 
 ## 10. 已知问题与后续方向
 
-1. **伪标签 ≠ 真实违约**：评估只能用回归指标；要做 AUC/KS 需 ST/退市/债违约等真值表。
+1. **伪标签 ≠ 真实违约**：纯 KMV 标签下评估只能用回归指标。已通过**方案D 混合标签**（`label_scheme="hybrid"`，见 §12.2.3）把 ST/*ST/失败退市事件抬高风险区间，从而能算 AUC/KS（见 §5.4.1）；但 ST 仍是「财务困境」代理，非交易所正式违约记录。
 2. **KMV 实现偏简化**：缺数时有默认/近似，标签噪声大。
 3. **市场风险（GARCH）线未落地**：PPT 有、当前数据/代码无。
 4. **图与时间窗对齐**：legacy 用「整集最密年」拓扑（已废弃）；`src/current` 已改为「按预测年建图」，见 §12.3.1。
@@ -386,20 +388,20 @@ KMV 伪标签 / TGC 训练预测端到端复现 legacy 效果，并用「注册�
 ```
 src/current/
 ├── config.py        # 路径(repository/)、.env token、特征列/窗口/切分年、各类超参
-├── registry.py      # 通用注册表：LABELERS / TEMPORAL_ENCODERS / VIZ_EXPORTERS / AGENT_HOOKS
-├── cli.py           # 入口：python -m src.current.cli {collect|edges|label|export|train|all}
+├── registry.py      # 通用注册表：LABELERS/LABEL_SCHEMES/TEMPORAL_ENCODERS/VIZ_EXPORTERS/AGENT_HOOKS
+├── cli.py           # 入口：python -m src.current.cli {collect|edges|events|label|export|train|predict|all}
 ├── pipeline.py      # 编排：采集 -> 标签 -> 导出 -> 训练
-├── data/            # tushare_client(限流/重试/缓存) + financial + market + supply_chain
+├── data/            # tushare_client(限流/重试/缓存) + financial + market + supply_chain + events(ST/退市)
 ├── transform/       # symbols(6位统一) + schema + exporter(→三张 parquet)
-├── labels/          # base(RiskLabeler) + kmv(P0) + market_garch(GARCH 插入点 stub)
+├── labels/          # base(RiskLabeler+LabelScheme) + schemes(kmv基线/hybrid混合) + kmv + st + market_garch(stub)
 ├── models/          # base(TemporalEncoder) + temporal(gated_conv默认/gru/lstm/transformer) + tgc
 ├── train/           # dataset(3年窗口+建图) + trainer(训练/评估/预测/指标)
 ├── viz/             # base(VizManager) + collectors(损失/散点/图快照) + neo4j_export(离线CSV)
-└── agents/          # base(4类增强hook) + noop(P0 占位)
+└── agents/          # base(4类增强hook) + reflection(反思Agent) + noop(P0 占位)
 
 repository/          # 全部新数据在此
 ├── raw/cache/       # 单次 Tushare 调用级 parquet 缓存（命中不耗额度，天然断点续跑）
-├── interim/         # financial/market/edges/labels 中间产物
+├── interim/         # financial/market/edges/labels/events 中间产物
 ├── processed/       # nodes.parquet / edges.parquet / labels.parquet
 └── outputs/         # current_tgc_<时间戳>/  训练产物 + experiments_log.csv（跨 run 台账）
 ```
@@ -409,32 +411,90 @@ repository/          # 全部新数据在此
 以及 **`metrics.json`**——记录本次「实验配置（时序模型 / 建图方案 / 标签变换 / 超参）+ 数据规模 +
 全部测试指标」。同时每次训练会向 `outputs/experiments_log.csv` **追加一行**，用于换时序模型或建图方案时做**横向对比**。
 
-### 12.2 常用命令
+### 12.2 命令行入口与参数
+
+主入口为 `src/current/cli.py`，统一用法：
 
 ```powershell
-$env:PYTHONUTF8="1"
-# 全流程（采集会消耗 Tushare 额度，支持断点续跑）
-& ".\.venv\Scripts\python.exe" -m src.current.cli all
-# 分步
-& ".\.venv\Scripts\python.exe" -m src.current.cli edges     # 仅本地重建边（不耗额度）
-& ".\.venv\Scripts\python.exe" -m src.current.cli collect   # 采集财务+行情
-& ".\.venv\Scripts\python.exe" -m src.current.cli label     # 生成 KMV 标签
-& ".\.venv\Scripts\python.exe" -m src.current.cli export    # 导出三张 parquet
-& ".\.venv\Scripts\python.exe" -m src.current.cli train     # 训练+评估+2025推演
+& ".\.venv\Scripts\python.exe" -m src.current.cli <command> [参数]
 ```
 
-> Token 从根目录 `.env` 的 `TUSHARE_TOKEN` 读取。采集用滑动窗口限频（默认 120 次/分钟）
-> + 相邻请求最小间隔 + 命中限频自动退避；每次 API 调用结果按参数哈希缓存到
-> `repository/raw/cache/`，重跑只补缺失，不会重复消耗额度。
+#### 12.2.1 子命令
 
-### 12.3 四类插入点（“加文件 + 注册”即扩展）
+| 命令 | 作用 | 是否消耗 Tushare 额度 |
+|------|------|----------------------|
+| `all` | 一键全流程：采集 → 标签 → 导出 → 训练 | 是（采集阶段） |
+| `collect` | 采集供应链边 + 财务特征 + 行情 + 风险事件(ST/退市) | 是 |
+| `edges` | 仅从本地 Excel 重建供应链边 | 否 |
+| `events` | 仅采集风险事件（`namechange` ST 状态 + `stock_basic` 退市） | 是 |
+| `label` | 按标签方案生成标签 → `interim/labels.parquet` | 否（读 interim） |
+| `export` | 导出三张 parquet → `processed/{nodes,edges,labels}.parquet` | 否 |
+| `train` | 训练 + 评估 + 2025 推演（需已 export） | 否 |
+| `predict` | 同 `train`（train 已含评估与 2025 推演） | 否 |
+
+#### 12.2.2 全局参数
+
+| 参数 | 含义 | 默认 |
+|------|------|------|
+| `--no-resume` | 采集时不使用断点续跑（否则只补缺失的 (symbol,year)） | 关闭（即默认断点续跑） |
+| `--scheme NAME` | 标签方案（仅 `label` 阶段生效），取值见 §12.2.3 | 取 `config.LabelConfig.label_scheme` |
+| `--log FILE` | 把 stdout/stderr 以 UTF-8 写入日志文件（推荐后台运行） | 无（输出到控制台） |
+
+#### 12.2.3 标签方案 `label_scheme`
+
+标签方案是一个**可配置对象**，用装饰器注册（与「时序模型」同构，见 §12.3），通过
+`config.LabelConfig.label_scheme` 或 `--scheme` 切换：
+
+| 方案 | 注册名 | 含义 |
+|------|--------|------|
+| 基线（默认） | `kmv` | 简化版 KMV 违约概率，不含任何事件混合 |
+| 混合标签（方案D） | `hybrid` | `default_probability = max(KMV, ST/*ST/失败退市事件概率)`，事件只上调风险、不下调；额外产出 `st_level` / `delisted` / `label_source` 列 |
+
+```powershell
+# 基线（默认，简化 KMV）
+& ".\.venv\Scripts\python.exe" -m src.current.cli label
+# 混合标签（方案D）
+& ".\.venv\Scripts\python.exe" -m src.current.cli label --scheme hybrid
+```
+
+#### 12.2.4 参数化训练脚本 `scripts/train.py`
+
+`cli train` 使用 `config.py` 里的默认超参；要做**超参/时序模型/Agent 消融实验**用
+`scripts/train.py`，它会 `deepcopy(CONFIG)` 再按命令行覆盖：
+
+| 参数 | 含义 | 默认 |
+|------|------|------|
+| `--epochs N` | 训练轮数 | 500 |
+| `--lr X` | 学习率 | 1e-3 |
+| `--weight-decay X` | Adam 的 L2 权重衰减 | 1e-5 |
+| `--hidden-dim N` | 隐藏层维度 | 64 |
+| `--dropout X` | Dropout 比率 | 0.3 |
+| `--temporal NAME` | 时序编码器：`gated_conv`(默认) / `gru` / `lstm` / `transformer` | gated_conv |
+| `--agent` | 启用反思 Agent（增强点D：难例重加权） | 关闭 |
+| `--no-agent` | 显式禁用 Agent | — |
+| `--no-reflection-retrain` | 启用 Agent 仅诊断、不做第二轮加权重训 | 关闭 |
+| `--name NAME` | 自定义输出目录名（便于对比实验） | `current_tgc_<时间戳>` |
+| `--eval-every N` | 每 N 轮评估一次并保存最佳模型（0=不评估） | 100 |
+| `--log FILE` | 日志输出文件路径 | 无 |
+
+```powershell
+# 示例：LSTM + 500 轮 + 反思 Agent + 自定义输出名
+& ".\.venv\Scripts\python.exe" scripts/train.py --temporal lstm --epochs 500 --agent --name exp_lstm_agent
+```
+
+> Token 从根目录 `.env` 的 `TUSHARE_TOKEN` 读取。采集用滑动窗口限频（默认 200 次/分钟，
+> 见 `config.TushareConfig`）+ 相邻请求最小间隔 + 命中限频自动退避；每次 API 调用结果
+> 按参数哈希缓存到 `repository/raw/cache/`，重跑只补缺失，不会重复消耗额度。
+
+### 12.3 五类插入点（“加文件 + 注册”即扩展）
 
 | 插入点 | 基类 / 注册表 | 现状 | 扩展方式 |
 |--------|---------------|------|----------|
-| 风险标签 | `labels/base.py` `RiskLabeler` / `LABELERS` | KMV(P0) + GARCH 市场风险(stub) | 新建 labeler 并 `@LABELERS.register`，加入 `config.LabelConfig.active_labelers` |
+| 底层标签器 | `labels/base.py` `RiskLabeler` / `LABELERS` | kmv(P0) + st(ST/退市事件) + market_garch(GARCH stub) | 新建 labeler 并 `@LABELERS.register`，供标签方案组合复用 |
+| 标签方案 | `labels/base.py` `LabelScheme` / `LABEL_SCHEMES` | `kmv` 基线默认，`hybrid` 混合标签 | 新建 scheme 并 `@LABEL_SCHEMES.register`，改 `config.LabelConfig.label_scheme` |
 | 时序模型 | `models/base.py` `TemporalEncoder` / `TEMPORAL_ENCODERS` | gated_conv 默认，另附 gru/lstm/transformer | 新建 encoder 注册后改 `config.ModelConfig.temporal_encoder` |
 | 绘图数据 | `viz/base.py` `VizExporter` / `VIZ_EXPORTERS` | 损失曲线/散点/图快照/Neo4j离线CSV | 新建 exporter 注册后加入 `config.VizConfig.active_exporters` |
-| Agent 集成 | `agents/base.py` `AgentHook` / `AGENT_HOOKS` | noop(P0)，四个增强hook占位 | 实现 hook 注册后在 `config.AgentConfig` 开启 |
+| Agent 集成 | `agents/base.py` `AgentHook` / `AGENT_HOOKS` | reflection(反思Agent) + noop(P0) | 实现 hook 注册后在 `config.AgentConfig` 开启 |
 
 > 时序模型对应 `LLM增强TGC供应链风控_设计文档.md` 中「时序模块可替换」；
 > Agent 四个 hook 对应该文档四个增强点（特征/关系/标签/反思）。
@@ -464,3 +524,76 @@ $env:PYTHONUTF8="1"
   GCN 已启用，测试 **R²≈0.46 / MSE≈0.0029**，与 legacy 基线量级一致。全量数据（8910 组合）
   采集完成后指标可进一步对齐 README 第 9 节。
 - 内网合规：Neo4j 插件只在本地生成离线 CSV（供 `neo4j-admin import`），不建立任何外部/公网连接。
+
+### 12.5 配置参数速查（`config.py`）
+
+所有模块统一从 `src/current/config.py` 读取配置。`CONFIG` 是全局默认实例；`scripts/train.py`
+会 `deepcopy(CONFIG)` 后按命令行覆盖部分超参。
+
+#### 12.5.1 建模常量
+
+| 参数 | 含义 | 默认 |
+|------|------|------|
+| `FEATURE_COLUMNS` | 模型实际使用的财务特征列（顺序即张量最后一维顺序，共 10 个） | 负债率/流动比率/速动比率/利息保障倍数/总资产/总负债/流动资产/流动负债/营收/营业利润 |
+| `LABEL_COLUMN` | 监督目标列名 | `default_probability` |
+| `SEQ_LEN` | 连续特征年数（前 N 年特征 → 第 N+1 年标签） | 3 |
+| `TRAIN_PRED_YEARS` | 训练集预测年区间（含端点） | (2007, 2020) |
+| `TEST_PRED_YEARS` | 测试集预测年区间（含端点） | (2021, 2024) |
+| `FUTURE_PREDICT_YEAR` | 推演目标年 | 2025 |
+| `FUTURE_INPUT_YEARS` | 推演用输入年 | (2022, 2023, 2024) |
+
+#### 12.5.2 `ModelConfig`（模型与训练超参）
+
+| 参数 | 含义 | 默认 |
+|------|------|------|
+| `temporal_encoder` | 时序编码器注册名（见 §12.3 时序模型插入点） | `gated_conv` |
+| `hidden_dim` | 隐藏层维度 | 64 |
+| `dropout` | Dropout 比率 | 0.3 |
+| `temporal_kernel` | 门控卷积核大小 | 3 |
+| `epochs` | 训练轮数 | 500 |
+| `lr` | 学习率 | 1e-3 |
+| `weight_decay` | Adam 的 L2 权重衰减 | 1e-5 |
+| `min_edges_for_gcn` | 样本级边数不足该值则退回简化卷积（无图） | 10 |
+| `graph_scheme` | 建图方案：`pred_year`（推荐，按预测年-lag 建分年块对角图）/ `densest_legacy`（废弃，仅对照） | `pred_year` |
+| `graph_lag` | 建图取「预测年 − lag」年的供应链边 | 1 |
+| `label_transform` | 标签变换：`logit`（训练在 logit 空间做 MSE）/ `none`（概率空间） | `logit` |
+
+#### 12.5.3 `LabelConfig`（标签方案）
+
+| 参数 | 含义 | 默认 |
+|------|------|------|
+| `label_scheme` | 标签方案注册名：`kmv`（基线简化 KMV）/ `hybrid`（方案D 混合标签） | `kmv` |
+| `default_point_ratio` | KMV 违约点 = 总负债 × 该比例（简化版） | 0.7 |
+| `min_asset_volatility` | 资产波动率下限（缓解标签集中于 0） | 0.3 |
+| `fallback_volatility` | 行情缺失时的资产波动率兜底 | 0.3 |
+| `risk_free_rate` | 无风险利率（10 年期国债收益率） | 0.025 |
+| `kmv_time_horizon` | KMV 时间 horizon T（年） | 1.0 |
+| `kmv_use_iterative` | 是否迭代求解标准 KMV（迭代会压缩标签分布，效果差，故默认简化） | False |
+| `st_probability` | 年度处于 ST 的违约概率（仅 `hybrid` 用） | 0.65 |
+| `star_st_probability` | 年度处于 *ST（退市风险警示）的违约概率（仅 `hybrid` 用） | 0.85 |
+| `delist_probability` | 年度退市（仅 ST/*ST 前缀失败退市）的违约概率（仅 `hybrid` 用） | 0.9 |
+
+#### 12.5.4 `TushareConfig`（采集节流）
+
+| 参数 | 含义 | 默认 |
+|------|------|------|
+| `max_requests_per_minute` | 全局跨接口每分钟最大请求数（高于此值易触发账号侧限流） | 200 |
+| `min_interval_sec` | 相邻请求最小间隔（秒） | 0.3 |
+| `max_retries` | 单次调用最大重试次数 | 5 |
+| `retry_backoff_sec` | 命中限频后的基础退避（按次数递增） | 60.0 |
+| `use_cache` | 命中 `raw/cache/` 缓存则不重复消耗额度 | True |
+
+#### 12.5.5 `AgentConfig` / `ReflectionConfig`（反思 Agent，增强点 D）
+
+| 参数 | 含义 | 默认 |
+|------|------|------|
+| `AgentConfig.enabled` | 是否启用 Agent 集成 | True |
+| `AgentConfig.hook` | 启用的 Agent 注册名 | `reflection` |
+| `ReflectionConfig.enabled` | 反思 Agent 是否做第二轮加权重训 | True |
+| `ReflectionConfig.max_weight_factor` / `min_weight_factor` | 样本权重裁剪上下限 | 3.0 / 0.3 |
+| `ReflectionConfig.label_conflict_downweight` | ST 冲突样本降权倍数 | 0.5 |
+| `ReflectionConfig.llm_enabled` | 是否调用 LLM 诊断 | True |
+| `ReflectionConfig.label_verify_enabled` | 是否用 Tushare `namechange` 交叉验证 ST 标签 | True |
+
+> 注：`cli train` 使用 `config.py` 默认超参；要覆盖上述 `ModelConfig` 字段做消融，
+> 用 `scripts/train.py` 的命令行参数（见 §12.2.4）。

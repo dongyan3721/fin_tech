@@ -5,8 +5,8 @@
 2) 结合折算系数/利率风险，映射为市场风险度量或违约概率修正项；
 3) 产出列如 market_risk_probability，与 KMV 标签在 labels 表并列。
 
-实现后把返回值改为真实 DataFrame，并在 config.LabelConfig.active_labelers 加入
-"market_garch" 即可自动纳入标签合并，无需改动其他代码。
+实现后把返回值改为真实 DataFrame，并新建一个组合它的 LabelScheme
+（或直接作为底层 labeler 被 kmv/hybrid 方案引用）即可纳入标签生成，无需改动其他代码。
 """
 from __future__ import annotations
 

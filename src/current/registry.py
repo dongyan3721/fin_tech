@@ -50,8 +50,9 @@ class Registry(Generic[T]):
         return key in self._registry
 
 
-# 四类插入点各自的全局注册表
-LABELERS: Registry = Registry("labelers")            # 风险标签插入点
+# 五类插入点各自的全局注册表
+LABELERS: Registry = Registry("labelers")            # 底层风险标签插入点（kmv/st/garch）
+LABEL_SCHEMES: Registry = Registry("label_schemes")  # 标签方案插入点（kmv=基线 / hybrid=混合）
 TEMPORAL_ENCODERS: Registry = Registry("temporal")    # 时序模型插入点
 VIZ_EXPORTERS: Registry = Registry("viz")             # 绘图数据收集插件
 AGENT_HOOKS: Registry = Registry("agents")            # Agent 集成插入点

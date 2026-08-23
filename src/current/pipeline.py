@@ -54,10 +54,10 @@ def step_events(resume: bool = True) -> None:
     EventCollector(TushareClient()).collect(symbols, resume=resume)
 
 
-def step_label() -> pd.DataFrame:
+def step_label(scheme: str | None = None) -> pd.DataFrame:
     from src.current.labels.base import generate_labels
-    import src.current.labels  # noqa: F401  触发 labeler 注册
-    return generate_labels(CONFIG.labels.active_labelers)
+    import src.current.labels  # noqa: F401  触发 labeler/scheme 注册
+    return generate_labels(scheme)
 
 
 def step_export() -> None:

@@ -1,12 +1,13 @@
-"""命令行入口：python -m src.current.cli {collect|edges|label|export|train|predict|all}
+"""命令行入口：python -m src.current.cli {collect|edges|events|label|export|train|predict|all}
 
 示例：
   python -m src.current.cli all              # 采集->标签->导出->训练 全流程
   python -m src.current.cli edges            # 仅从本地 Excel 重建边（不耗额度）
-  python -m src.current.cli collect          # 仅采集（财务/行情消耗 Tushare 额度）
-  python -m src.current.cli label            # 仅生成标签（需已采集）
+  python -m src.current.cli collect          # 采集财务+行情+风险事件（消耗 Tushare 额度）
+  python -m src.current.cli events           # 仅采集风险事件（ST 状态/退市，方案D 真值）
+  python -m src.current.cli label            # 仅生成标签（默认 kmv 基线，--scheme hybrid 混合）
   python -m src.current.cli export           # 仅导出三张 parquet
-  python -m src.current.cli train            # 仅训练（需已导出）
+  python -m src.current.cli train            # 仅训练+评估+2025推演（需已导出）
 """
 from __future__ import annotations
 
@@ -36,6 +37,8 @@ def main(argv=None) -> int:
                         choices=["collect", "edges", "events", "label", "export", "train", "predict", "all"],
                         help="要执行的阶段")
     parser.add_argument("--no-resume", action="store_true", help="采集时不使用断点续跑")
+    parser.add_argument("--scheme", metavar="NAME", default=None,
+                        help="标签方案（label 阶段，如 kmv/hybrid；默认取 config）")
     parser.add_argument("--log", metavar="FILE", default=None,
                         help="把 stdout/stderr 以 UTF-8 写入该文件（推荐后台运行时使用）")
     args = parser.parse_args(argv)
@@ -53,7 +56,7 @@ def main(argv=None) -> int:
     elif cmd == "events":
         pipeline.step_events(resume=resume)
     elif cmd == "label":
-        pipeline.step_label()
+        pipeline.step_label(scheme=args.scheme)
     elif cmd == "export":
         pipeline.step_export()
     elif cmd in ("train", "predict"):
