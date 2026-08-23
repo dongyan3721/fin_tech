@@ -215,6 +215,24 @@ def get_llm_config() -> dict:
     }
 
 
+def get_neo4j_config() -> dict:
+    """从 .env 读取 Neo4j 连接配置（server 启动同步 + scripts/export_neo4j.py 共用）。
+
+    .env 需写入（缺省时 server 优雅跳过同步）：
+        NEO4J_URI=bolt://localhost:7687
+        NEO4J_USER=neo4j
+        NEO4J_PASSWORD=<你的密码>
+        NEO4J_DATABASE=neo4j   # 可选，默认 neo4j
+    """
+    load_dotenv()
+    return {
+        "uri": os.getenv("NEO4J_URI", ""),
+        "user": os.getenv("NEO4J_USER", "neo4j"),
+        "password": os.getenv("NEO4J_PASSWORD", ""),
+        "database": os.getenv("NEO4J_DATABASE", "neo4j"),
+    }
+
+
 # 全局默认配置实例（其他模块直接 from src.current.config import CONFIG）
 CONFIG = Config()
 CONFIG.ensure_dirs()

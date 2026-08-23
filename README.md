@@ -602,6 +602,27 @@ repository/          # 全部新数据在此
 | `ReflectionConfig.llm_enabled` | 是否调用 LLM 诊断 | True |
 | `ReflectionConfig.label_verify_enabled` | 是否用 Tushare `namechange` 交叉验证 ST 标签 | True |
 
+#### 12.5.6 Neo4j 连接配置（`.env`，可迁移性）
+
+Neo4j 仅作为供应链图的落库/查询数据源，**不参与模型训练**；前端图谱经 FastAPI 读 parquet
+渲染，不直连 7687。在根目录 `.env` 写入以下键后，`server` 每次启动会自动把供应链图同步进
+Neo4j（幂等：节点 MERGE、关系先删后建），未配置/不可达则优雅跳过、不影响其他功能：
+
+| 键 | 含义 | 示例 |
+|----|------|------|
+| `NEO4J_URI` | Bolt 地址 | `bolt://localhost:7687` |
+| `NEO4J_USER` | 用户名 | `neo4j` |
+| `NEO4J_PASSWORD` | 密码 | `grapheval2026` |
+| `NEO4J_DATABASE` | 数据库名（可选） | `neo4j` |
+
+同步实现见 `server/services/neo4j_sync.py`（`sync_neo4j()`，启动时后台线程调用）；
+手动全量重建/校验可用：
+
+```powershell
+& ".\.venv\Scripts\python.exe" scripts/export_neo4j.py           # 同步 + 校验
+& ".\.venv\Scripts\python.exe" scripts/export_neo4j.py --wipe    # 清空后同步
+```
+
 > 注：`cli train` 使用 `config.py` 默认超参；要覆盖上述 `ModelConfig` 字段做消融，
 > 用 `scripts/train.py` 的命令行参数（见 §12.2.4）。
 

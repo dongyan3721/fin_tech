@@ -13,11 +13,20 @@ import argparse
 import sys
 from pathlib import Path
 
+# 控制台/日志统一 UTF-8，避免 Windows GBK 无法编码中文/emoji
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
+except Exception:
+    pass
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import uvicorn
+from contextlib import asynccontextmanager
+from threading import Thread
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -28,8 +37,34 @@ from server.routers import graph, model, company
 FRONTEND_DIST = PROJECT_ROOT / "frontend" / "current" / "dist"
 
 
+def _startup_neo4j_sync() -> None:
+    """后台线程：启动时把供应链图同步到 Neo4j（未配置/不可达则优雅跳过）。"""
+    def _log(msg: str) -> None:
+        print(msg, flush=True)
+
+    try:
+        from server.services.neo4j_sync import sync_neo4j
+
+        result = sync_neo4j()
+        if result["status"] == "ok":
+            flag = "一致" if result["consistent"] else "不一致"
+            _log(f"[neo4j] 启动同步完成: 节点={result['nodes']} 关系={result['relationships']}（{flag}）")
+        elif result["status"] == "skipped":
+            _log(f"[neo4j] 启动同步跳过: {result['reason']}")
+        else:
+            _log(f"[neo4j] 启动同步失败({result['status']}): {result.get('reason')}")
+    except Exception as e:  # noqa: BLE001
+        _log(f"[neo4j] 启动同步异常: {e}")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    Thread(target=_startup_neo4j_sync, daemon=True).start()
+    yield
+
+
 def create_app() -> FastAPI:
-    app = FastAPI(title="供应链风险评估 API", version="0.1.0")
+    app = FastAPI(title="供应链风险评估 API", version="0.1.0", lifespan=lifespan)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
