@@ -89,6 +89,12 @@ def parse_args() -> argparse.Namespace:
                    choices=["gated_conv", "gru", "lstm", "transformer"],
                    help="时序编码器 (default: gated_conv)")
 
+    p.add_argument("--label-scheme", type=str, default=None,
+                   choices=["kmv", "hybrid"],
+                   help="标签方案：kmv=基线简化KMV, hybrid=方案D混合标签 (default: 取 config)")
+    p.add_argument("--no-prepare-label", action="store_true",
+                   help="训练前不重新生成标签，直接使用磁盘已有的 processed 标签")
+
     p.add_argument("--agent", action="store_true", help="启用反思 Agent（增强点 D）")
     p.add_argument("--no-agent", action="store_true", help="禁用 Agent（默认）")
     p.add_argument("--no-reflection-retrain", action="store_true",
@@ -115,6 +121,9 @@ def build_config(args: argparse.Namespace):
     cfg.model.dropout = args.dropout
     cfg.model.temporal_encoder = args.temporal
 
+    if args.label_scheme is not None:
+        cfg.labels.label_scheme = args.label_scheme
+
     if args.agent and not args.no_agent:
         cfg.agent.enabled = True
         cfg.agent.hook = "reflection"
@@ -138,6 +147,7 @@ def print_config(cfg, args: argparse.Namespace) -> None:
     print(f"  隐藏层维度:  {cfg.model.hidden_dim}")
     print(f"  Dropout:     {cfg.model.dropout}")
     print(f"  时序编码器:  {cfg.model.temporal_encoder}")
+    print(f"  标签方案:    {cfg.labels.label_scheme}")
     print(f"  标签变换:    {cfg.model.label_transform}")
     print(f"  建图方案:    {cfg.model.graph_scheme} (lag={cfg.model.graph_lag})")
     print(f"  Agent:       {'反思 Agent' if cfg.agent.enabled else '关闭'}")
@@ -177,6 +187,20 @@ def redirect_logs(log_path: str) -> None:
     sys.stderr = f
 
 
+def prepare_labels(cfg) -> None:
+    """训练前按 cfg.labels.label_scheme 重新生成标签并导出到 processed。
+
+    保证 processed/labels.parquet 与本次训练选择的标签方案一致（避免磁盘残留其他方案）。
+    """
+    import src.current.labels  # noqa: F401  触发 labeler/scheme 注册
+    from src.current.labels.base import generate_labels
+    from src.current.transform.exporter import export_labels
+
+    print(f"[label] 训练前按方案 {cfg.labels.label_scheme!r} 重新生成标签 ...")
+    generate_labels(cfg.labels.label_scheme)
+    export_labels()
+
+
 def main() -> int:
     args = parse_args()
 
@@ -185,6 +209,9 @@ def main() -> int:
 
     cfg = build_config(args)
     print_config(cfg, args)
+
+    if not args.no_prepare_label:
+        prepare_labels(cfg)
 
     from src.current.train.trainer import Trainer
 

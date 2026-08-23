@@ -443,7 +443,8 @@ repository/          # 全部新数据在此
 #### 12.2.3 标签方案 `label_scheme`
 
 标签方案是一个**可配置对象**，用装饰器注册（与「时序模型」同构，见 §12.3），通过
-`config.LabelConfig.label_scheme` 或 `--scheme` 切换：
+`config.LabelConfig.label_scheme`、`cli label --scheme` 或 `scripts/train.py --label-scheme`
+三处切换：
 
 | 方案 | 注册名 | 含义 |
 |------|--------|------|
@@ -459,8 +460,10 @@ repository/          # 全部新数据在此
 
 #### 12.2.4 参数化训练脚本 `scripts/train.py`
 
-`cli train` 使用 `config.py` 里的默认超参；要做**超参/时序模型/Agent 消融实验**用
-`scripts/train.py`，它会 `deepcopy(CONFIG)` 再按命令行覆盖：
+`cli train` 使用 `config.py` 里的默认超参；要做**超参/时序模型/标签方案/Agent 消融实验**用
+`scripts/train.py`，它会 `deepcopy(CONFIG)` 再按命令行覆盖。**训练前默认按所选标签方案
+重新生成标签并导出**（保证 `processed/labels.parquet` 与本次训练一致），可加
+`--no-prepare-label` 跳过、直接用磁盘已有标签：
 
 | 参数 | 含义 | 默认 |
 |------|------|------|
@@ -470,6 +473,8 @@ repository/          # 全部新数据在此
 | `--hidden-dim N` | 隐藏层维度 | 64 |
 | `--dropout X` | Dropout 比率 | 0.3 |
 | `--temporal NAME` | 时序编码器：`gated_conv`(默认) / `gru` / `lstm` / `transformer` | gated_conv |
+| `--label-scheme NAME` | 标签方案：`kmv`（基线）/ `hybrid`（方案D 混合），见 §12.2.3 | 取 `config.LabelConfig.label_scheme`（默认 kmv） |
+| `--no-prepare-label` | 训练前不重新生成标签，直接用磁盘已有的 processed 标签 | 关闭（默认重新生成） |
 | `--agent` | 启用反思 Agent（增强点D：难例重加权） | 关闭 |
 | `--no-agent` | 显式禁用 Agent | — |
 | `--no-reflection-retrain` | 启用 Agent 仅诊断、不做第二轮加权重训 | 关闭 |
@@ -478,7 +483,9 @@ repository/          # 全部新数据在此
 | `--log FILE` | 日志输出文件路径 | 无 |
 
 ```powershell
-# 示例：LSTM + 500 轮 + 反思 Agent + 自定义输出名
+# 示例：LSTM + 500 轮 + 混合标签 + 自定义输出名
+& ".\.venv\Scripts\python.exe" scripts/train.py --temporal lstm --epochs 500 --label-scheme hybrid --name exp_lstm_hybrid
+# 示例：LSTM + 500 轮 + 反思 Agent + 基线 KMV 标签
 & ".\.venv\Scripts\python.exe" scripts/train.py --temporal lstm --epochs 500 --agent --name exp_lstm_agent
 ```
 
@@ -597,3 +604,60 @@ repository/          # 全部新数据在此
 
 > 注：`cli train` 使用 `config.py` 默认超参；要覆盖上述 `ModelConfig` 字段做消融，
 > 用 `scripts/train.py` 的命令行参数（见 §12.2.4）。
+
+### 12.6 `scripts/` 目录脚本用途
+
+| 脚本 | 用途 | 是否消耗 Tushare 额度 | 可配置参数 |
+|------|------|----------------------|------------|
+| `merge_supply_data.py` | 合并 3 个供应链 Excel → 统一 schema 的 `data/raw/整合的供应链数据.xlsx` | 否 | 无 |
+| `train.py` | 参数化训练（超参/时序模型/标签方案/Agent 消融） | 否（读 interim 重生成标签 + 已导出 parquet） | 有，见 §12.2.4 |
+| `predict.py` | 加载 checkpoint 推理：预测指定年份违约概率与评级 | 否 | 有，见下 |
+| `search_epochs.py` | 训练轮数搜索实验（0–2000 轮，每 100 轮评估） | 否 | 无 |
+
+#### 12.6.1 `merge_supply_data.py` —— 供应链数据整合
+
+把 `repository/supply/` 下的三份 Excel 合并成 `supply_chain.py` 能读的统一格式：
+
+| 源文件 | 内容 |
+|--------|------|
+| `整合的供应链数据.xlsx` | 历史数据 2001–2023（`供应链网络数据` sheet） |
+| `SC_TopFivePurchaseInfo 2024-2025.xlsx` | 2024–2025 前五大供应商 |
+| `SC_TopFiveSaleInfo 2024-2025.xlsx` | 2024–2025 前五大客户 |
+
+输出 `data/raw/整合的供应链数据.xlsx`（`供应链网络数据` sheet，2001–2025），列为
+`Year/Symbol/EndDate/供应商/采购额/采购占比/客户/销售额/销售占比`（与 `TARGET_COLUMNS` 对齐）。
+
+```powershell
+& ".\.venv\Scripts\python.exe" scripts/merge_supply_data.py
+```
+
+#### 12.6.2 `predict.py` —— 推理预测
+
+加载 `model_checkpoint.pt`，用「目标年前 3 年」特征预测该年违约概率与评级。
+
+| 参数 | 含义 | 默认 |
+|------|------|------|
+| `--year N` | 预测目标年份 | 2025 |
+| `--checkpoint PATH` | checkpoint 路径 | 自动找 `outputs/current_tgc_*/` 里最新 |
+| `--top N` | 控制台输出 Top N 高风险公司 | 20 |
+| `--all` | 输出全部公司（否则仅 Top N） | 关闭 |
+| `--output FILE` | 结果另存为 CSV | 无 |
+
+```powershell
+# 预测 2025，打印 Top 20
+& ".\.venv\Scripts\python.exe" scripts/predict.py --year 2025 --top 20
+# 指定 checkpoint + 导出全部结果
+& ".\.venv\Scripts\python.exe" scripts/predict.py --year 2025 --checkpoint repository/outputs/<run>/model_checkpoint.pt --output predictions.csv --all
+```
+
+#### 12.6.3 `search_epochs.py` —— 训练轮数搜索
+
+跑 2000 轮、每 100 轮评估一次（`eval_log.csv`），自动报告 R²/IC/Spearman 各自最优的 epoch，
+给出建议默认训练轮数（当前 `ModelConfig.epochs=500` 即由此确定）。
+
+```powershell
+& ".\.venv\Scripts\python.exe" scripts/search_epochs.py
+```
+
+> `train.py`（参数化训练）的完整参数见 §12.2.4；`predict.py` 依赖已存在的 checkpoint，
+> `merge_supply_data.py` 只需在供应链 Excel 有更新时重跑。
