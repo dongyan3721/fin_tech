@@ -20,104 +20,28 @@ import numpy as np
 import pandas as pd
 
 from src.current.config import CONFIG
+from src.current.data import futures as fdata
 from src.current.data.tushare_client import TushareClient
 from src.current.labels.base import LabelContext, RiskLabeler
 from src.current.registry import LABELERS
 from src.current.transform.symbols import normalize_symbol
 
 
-def _years() -> list[int]:
-    return list(range(CONFIG.labels.market_start_year, CONFIG.labels.market_end_year + 1))
-
-
 class _MarketRiskData:
-    """市场风险标签所需数据的加载/采集（全部带磁盘缓存）。"""
+    """数据访问门面：期货/行业取数复用 data.futures 的共享缓存。"""
 
     def __init__(self) -> None:
         self.client = TushareClient()
         self.dir = CONFIG.market_dir
-        (self.dir / "futures").mkdir(parents=True, exist_ok=True)
 
-    # -- 行业成员（申万 L1） --------------------------------------------
-    def industry_members(self, industry_codes: list[str]) -> pd.DataFrame:
-        """返回列: symbol, l1_code, l1_name, in_date, out_date。"""
-        cache = self.dir / "industry_members.parquet"
-        if cache.exists():
-            return pd.read_parquet(cache)
-        frames = []
-        for code in industry_codes:
-            df = self.client.query("index_member_all", l1_code=code)
-            if df is None or df.empty:
-                print(f"[market] 行业成员为空: {code}")
-                continue
-            df = df.copy()
-            df["l1_code"] = code
-            frames.append(df)
-            print(f"[market] 行业成员 {code}: {len(df)}")
-        if not frames:
-            return pd.DataFrame(columns=["symbol", "l1_code", "l1_name", "in_date", "out_date"])
-        allm = pd.concat(frames, ignore_index=True)
-        allm["symbol"] = allm["ts_code"].map(normalize_symbol)
-        allm = allm[["symbol", "l1_code", "l1_name", "in_date", "out_date"]].drop_duplicates(
-            subset=["symbol", "l1_code"], keep="last")
-        allm.to_parquet(cache, index=False)
-        print(f"[market] 行业成员缓存: {len(allm)} 条 -> {cache.name}")
-        return allm
+    def industry_members(self, industry_codes):
+        return fdata.fetch_industry_members(self.client, industry_codes)
 
-    # -- 商品连续价格 + 换月映射 ----------------------------------------
-    def commodity_price(self, code: str, suffix: str) -> pd.DataFrame:
-        """主力连续日线（settle 优先），列: trade_date, price。带缓存。"""
-        cache = self.dir / "futures" / f"{code}.parquet"
-        if cache.exists():
-            return pd.read_parquet(cache)
-        ts_code = f"{code}.{suffix}"
-        frames = []
-        for y in _years():
-            df = self.client.query("fut_daily", ts_code=ts_code,
-                                   start_date=f"{y}0101", end_date=f"{y}1231",
-                                   fields="ts_code,trade_date,close,settle")
-            if df is None or df.empty:
-                print(f"[market] {ts_code} {y} 无行情")
-                continue
-            frames.append(df)
-        if not frames:
-            print(f"[market] 无期货价格: {ts_code}")
-            return pd.DataFrame(columns=["trade_date", "price"])
-        raw = pd.concat(frames, ignore_index=True)
-        raw["price"] = raw["settle"].where(raw["settle"].notna() & (raw["settle"] > 0), raw["close"])
-        raw = raw.dropna(subset=["price"])
-        raw = raw[raw["price"] > 0]
-        out = (raw[["trade_date", "price"]]
-               .drop_duplicates(subset="trade_date", keep="last")
-               .sort_values("trade_date").reset_index(drop=True))
-        out.to_parquet(cache, index=False)
-        print(f"[market] {ts_code} 连续价格 {len(out)} 天 -> 缓存")
-        return out
+    def commodity_price(self, code: str, suffix: str):
+        return fdata.fetch_commodity_price(self.client, code, suffix)
 
-    def roll_days(self, code: str, suffix: str) -> set[str]:
-        """主力合约切换的交易日（这些日的对数收益跨合约，需剔除）。"""
-        cache = self.dir / "futures" / f"{code}_mapping.parquet"
-        if cache.exists():
-            df = pd.read_parquet(cache)
-        else:
-            ts_code = f"{code}.{suffix}"
-            frames = []
-            for y in _years():
-                df = self.client.query("fut_mapping", ts_code=ts_code,
-                                       start_date=f"{y}0101", end_date=f"{y}1231")
-                if df is None or df.empty:
-                    continue
-                frames.append(df)
-            if not frames:
-                print(f"[market] 无换月映射: {ts_code}（不剔除换月日）")
-                return set()
-            df = (pd.concat(frames, ignore_index=True)
-                  .drop_duplicates(subset="trade_date", keep="last")
-                  .sort_values("trade_date").reset_index(drop=True))
-            df.to_parquet(cache, index=False)
-        mapped = df["mapping_ts_code"].astype(str)
-        changed = mapped != mapped.shift(1)
-        return set(df.loc[changed, "trade_date"].astype(str))
+    def roll_days(self, code: str, suffix: str):
+        return fdata.fetch_roll_days(self.client, code, suffix)
 
 
 def _annual_commodity_risk(data: _MarketRiskData, weights: pd.DataFrame) -> pd.DataFrame:

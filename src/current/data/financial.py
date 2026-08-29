@@ -55,9 +55,9 @@ def _ratios(bs: pd.DataFrame, inc: pd.DataFrame, symbol: str, year: int, ts_code
         "current_ratio": (current_assets / total_cur_liab) if (pd.notna(total_cur_liab) and total_cur_liab) else np.nan
     }
 
-    if pd.notna(current_liab) and current_liab and pd.notna(current_assets):
+    if pd.notna(total_cur_liab) and total_cur_liab and pd.notna(current_assets):
         inv = 0.0 if pd.isna(inventory) else inventory
-        rec["quick_ratio"] = (current_assets - inv) / current_liab
+        rec["quick_ratio"] = (current_assets - inv) / total_cur_liab
     else:
         rec["quick_ratio"] = np.nan
     if pd.notna(fin_exp) and fin_exp != 0 and pd.notna(operate_profit):

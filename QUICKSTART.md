@@ -45,13 +45,14 @@ SILICON_MODEL=Qwen/Qwen3.5-27B
 
 ```bash
 .venv\Scripts\python.exe scripts/merge_supply_data.py   # 合并供应链 Excel → data/raw/
-.venv\Scripts\python.exe -m src.current.cli collect      # 采集边+财务+行情+风险事件（耗额度，可断点续跑）
+.venv\Scripts\python.exe -m src.current.cli collect      # 采集边+财务+行情+风险事件+期货/行业（耗额度，可断点续跑）
 .venv\Scripts\python.exe -m src.current.cli label        # 生成标签（默认 kmv 方案）
 .venv\Scripts\python.exe -m src.current.cli export       # 导出 processed/{nodes,edges,labels}.parquet
 ```
 
-> 提示：`label --scheme market`（市场风险标签）首跑需拉取约 1400 次期货数据（约 10 分钟），
-> 之后全部走缓存秒级完成。拿到现成 `repository/processed/*.parquet` 可跳过本节。
+> 提示：`collect` 一步即包含市场风险标签所需的全部原始数据（36 个商品期货日线/换月映射 + 申万行业成员，
+> 首跑约 10 分钟，之后走缓存秒级）。`label --scheme market` 阶段只做 GARCH 计算，不再联网。
+> 拿到现成 `repository/processed/*.parquet` 可跳过本节。
 
 ## 5. 启动前后端
 

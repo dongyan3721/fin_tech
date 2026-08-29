@@ -14,7 +14,7 @@
 
 ## 执行流程
 ```bash
-.venv\Scripts\python.exe -m src.current.cli collect   # 采集边+财务+行情(Tushare)
+.venv\Scripts\python.exe -m src.current.cli collect   # 采集边+财务+行情+风险事件+期货/行业(Tushare)
 .venv\Scripts\python.exe -m src.current.cli label     # KMV 标签生成
 .venv\Scripts\python.exe -m src.current.cli export    # 导出三张 parquet
 .venv\Scripts\python.exe -m src.current.cli train     # 训练+评估+推演

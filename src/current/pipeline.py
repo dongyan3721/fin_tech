@@ -10,12 +10,13 @@ from src.current.config import CONFIG
 
 
 def step_collect(resume: bool = True) -> None:
-    """采集供应链边 + 财务特征 + 行情 + 风险事件（后三者消耗 Tushare 额度）。"""
+    """采集供应链边 + 财务特征 + 行情 + 风险事件 + 商品期货/行业成员（消耗 Tushare 额度）。"""
     from src.current.data import supply_chain
     from src.current.data.financial import FinancialCollector
     from src.current.data.market import MarketCollector
     from src.current.data.tushare_client import TushareClient
     from src.current.data.events import EventCollector
+    from src.current.data.futures import FuturesCollector
 
     print("=== [collect] 供应链边 ===")
     edges = supply_chain.collect_edges()
@@ -33,6 +34,8 @@ def step_collect(resume: bool = True) -> None:
     MarketCollector(client).collect(combos, resume=resume)
     print("=== [collect] 风险事件（ST/退市，方案D 混合标签真值）===")
     EventCollector(client).collect(symbols, resume=resume)
+    print("=== [collect] 商品期货 + 行业成员（市场风险标签）===")
+    FuturesCollector(client).collect()
 
 
 def step_edges_only() -> None:

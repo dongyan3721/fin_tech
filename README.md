@@ -426,7 +426,7 @@ repository/          # 全部新数据在此
 | 命令 | 作用 | 是否消耗 Tushare 额度 |
 |------|------|----------------------|
 | `all` | 一键全流程：采集 → 标签 → 导出 → 训练 | 是（采集阶段） |
-| `collect` | 采集供应链边 + 财务特征 + 行情 + 风险事件(ST/退市) | 是 |
+| `collect` | 采集供应链边 + 财务特征 + 行情 + 风险事件(ST/退市) + 商品期货/行业成员 | 是 |
 | `edges` | 仅从本地 Excel 重建供应链边 | 否 |
 | `events` | 仅采集风险事件（`namechange` ST 状态 + `stock_basic` 退市） | 是 |
 | `label` | 按标签方案生成标签 → `interim/labels.parquet` | 否（读 interim） |
