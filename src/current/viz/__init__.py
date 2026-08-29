@@ -6,7 +6,6 @@
 config.VizConfig.active_exporters 里启用。
 """
 from src.current.viz import collectors  # noqa: F401  触发注册
-from src.current.viz import neo4j_export  # noqa: F401  触发注册（预留）
 from src.current.viz.base import VizExporter, VizManager
 
 __all__ = ["VizExporter", "VizManager"]

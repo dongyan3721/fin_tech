@@ -16,13 +16,30 @@ import { fmtProb } from '@/utils/rating'
 
 const store = useAppStore()
 
+const INF_YEAR = new Date().getFullYear()
+
 const meta = ref(null)
 const metrics = ref(null)
 const evalLog = ref([])
 const testItems = ref([])
 const futureItems = ref([])
+const infMeta = ref({ year: INF_YEAR, n_companies: 0 })
 const loading = ref(false)
 const evalEmpty = ref(false)
+
+const probLabel = computed(() => {
+  const s = metrics.value?.label_scheme
+  if (s === 'market') return '平均预测市场风险'
+  if (s === 'mix') return '平均综合风险评分'
+  return '平均预测违约概率'
+})
+
+const probShort = computed(() => {
+  const s = metrics.value?.label_scheme
+  if (s === 'market') return '市场风险'
+  if (s === 'mix') return '综合评分'
+  return '违约概率'
+})
 
 async function loadMeta() {
   meta.value = await api.meta()
@@ -34,14 +51,22 @@ async function loadRun() {
   if (!run) return
   loading.value = true
   try {
-    const [m, t, f] = await Promise.all([
+    const [m, t] = await Promise.all([
       api.modelMetrics(run),
       api.predictionsTest(run),
-      api.predictionsFuture(run),
     ])
     metrics.value = m
     testItems.value = t.items
-    futureItems.value = f.items
+
+    // 实时推理失败不应拖垮其它图表（top=1000 覆盖全部参与公司）
+    try {
+      const f = await api.inference(run, INF_YEAR, 1000)
+      futureItems.value = f.items
+      infMeta.value = { year: f.year, n_companies: f.n_companies }
+    } catch {
+      futureItems.value = []
+      infMeta.value = { year: INF_YEAR, n_companies: 0 }
+    }
 
     evalEmpty.value = false
     try {
@@ -79,7 +104,7 @@ const topColumns = [
   { title: '排名', key: 'rank', width: 56 },
   { title: '股票代码', key: 'symbol', width: 100 },
   {
-    title: '违约概率',
+    title: probShort,
     key: 'predicted_probability',
     render: (row) => fmtProb(row.predicted_probability, 3),
   },
@@ -116,8 +141,8 @@ function topRows() {
             accent="#4c8dff" />
         </n-gi>
         <n-gi>
-          <MetricCard label="平均预测违约概率" :value="avgProb"
-            :sub="futureItems.length ? `未来榜单 ${futureItems.length} 家` : '—'" accent="#f0a020" />
+          <MetricCard :label="probLabel" :value="avgProb"
+            :sub="futureItems.length ? `${INF_YEAR} 年预测 · ${infMeta.n_companies} 家` : '—'" accent="#f0a020" />
         </n-gi>
         <n-gi>
           <MetricCard label="R²(prob)" :value="metrics ? metrics.r2.toFixed(4) : '—'"
@@ -156,8 +181,14 @@ function topRows() {
       </n-grid>
 
       <!-- 高风险榜 -->
-      <ChartCard title="高风险榜 Top 10（未来预测）" :loading="loading"
-        :empty="!topFuture.length" style="margin-top: 16px">
+      <ChartCard :loading="loading" :empty="!topFuture.length"
+        empty-text="该模型暂无推理结果" style="margin-top: 16px">
+        <template #header>
+          <div class="top-header">
+            <span class="top-title">高风险榜 Top 10（{{ INF_YEAR }} 年预测）</span>
+            <span class="top-note">基于 {{ INF_YEAR - 3 }}–{{ INF_YEAR - 1 }} 年特征实时推理</span>
+          </div>
+        </template>
         <n-data-table
           :columns="topColumns"
           :data="topRows()"
@@ -169,3 +200,22 @@ function topRows() {
     </n-spin>
   </div>
 </template>
+
+<style scoped>
+.top-header {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.top-title {
+  font-weight: 600;
+  font-size: 15px;
+}
+
+.top-note {
+  font-size: 12px;
+  opacity: 0.55;
+}
+</style>

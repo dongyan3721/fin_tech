@@ -42,8 +42,8 @@
 - Tushare 限频：200 QPM（低于此值易触发账号侧限流导致 60s 退避）
 - 产出目录：`repository/{raw,interim,processed,outputs}/`
 - 默认训练轮数：500 epoch（通过 0-2000 轮搜索确定，R² 峰值 0.146）
-- Neo4j 连接：`.env` 里 `NEO4J_URI/USER/PASSWORD/DATABASE`；`server` 每次启动自动把供应链图同步进 Neo4j（未配置/不可达则优雅跳过，见 `server/services/neo4j_sync.py`）
-- 前后端：`server/` FastAPI（读 parquet，启动自动同步 Neo4j）+ `frontend/current/` Vue3 应用；开发 `bash server/api.sh start` + `npm run dev`，生产 `npm run build` 后由 FastAPI 托管
+- Neo4j 依赖已移除：`server` 启动时把各年度供应链图预加载进内存缓存（`server/services/graph_cache.py`，日志埋点），查询毫秒级；图数据仅来自 `processed/{edges,labels}.parquet`
+- 前后端：`server/` FastAPI（读 parquet，启动预加载图缓存）+ `frontend/current/` Vue3 应用；开发 `bash server/api.sh start` + `npm run dev`，生产 `npm run build` 后由 FastAPI 托管
 
 ## 增强点 D：反思 Agent（Reflection Agent）
 - 实现文件：`src/current/agents/reflection.py`

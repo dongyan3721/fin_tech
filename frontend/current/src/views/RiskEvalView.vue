@@ -1,6 +1,6 @@
 <script setup>
 import { ref, computed, watch, onMounted, h } from 'vue'
-import { NGrid, NGi, NSelect, NInput, NButton, NDataTable, useMessage } from 'naive-ui'
+import { NGrid, NGi, NInputNumber, NButton, NDataTable, useMessage } from 'naive-ui'
 import { api } from '@/api/client'
 import { useAppStore } from '@/stores/app'
 import PageHeader from '@/components/layout/PageHeader.vue'
@@ -10,7 +10,7 @@ import RunSelecter from '@/components/data/RunSelecter.vue'
 import ChartCard from '@/components/charts/ChartCard.vue'
 import ScatterActualPred from '@/components/charts/ScatterActualPred.vue'
 import RatingDonut from '@/components/charts/RatingDonut.vue'
-import { RATING_ORDER, fmtProb } from '@/utils/rating'
+import { fmtProb } from '@/utils/rating'
 
 const store = useAppStore()
 const message = useMessage()
@@ -20,56 +20,65 @@ const metrics = ref(null)
 const testItems = ref([])
 const loading = ref(false)
 
-const filterRating = ref(null)
-const filterYear = ref(null)
-const search = ref('')
+// —— 实时推理 ——
+const INF_YEAR = new Date().getFullYear()
+const infYear = ref(INF_YEAR)
+const infItems = ref([])
+const infMeta = ref({ n_companies: 0, year: INF_YEAR })
+const infLoading = ref(false)
 
-const RATING_OPTIONS = RATING_ORDER.map((r) => ({ label: r, value: r }))
-
-const filtered = computed(() => {
-  let arr = testItems.value
-  if (filterRating.value) arr = arr.filter((i) => i.actual_rating === filterRating.value)
-  if (filterYear.value) arr = arr.filter((i) => i.prediction_year === filterYear.value)
-  if (search.value) {
-    const q = search.value.trim()
-    arr = arr.filter((i) => String(i.symbol).includes(q))
-  }
-  return arr
+const probShort = computed(() => {
+  const s = metrics.value?.label_scheme
+  if (s === 'market') return '市场风险'
+  if (s === 'mix') return '综合评分'
+  return '违约概率'
 })
 
-const yearOptions = computed(() => {
-  const ys = [...new Set(testItems.value.map((i) => i.prediction_year))].sort((a, b) => a - b)
-  return ys.map((y) => ({ label: String(y), value: y }))
-})
-
-const columns = [
-  { title: '代码', key: 'symbol', width: 96 },
-  { title: '预测年', key: 'prediction_year', width: 80 },
+const infColumns = computed(() => [
+  { title: '排名', key: 'rank', width: 64 },
+  { title: '股票代码', key: 'symbol', width: 120 },
   {
-    title: '实际概率', key: 'actual_probability', width: 110,
-    render: (r) => fmtProb(r.actual_probability, 3),
-  },
-  {
-    title: '预测概率', key: 'predicted_probability', width: 110,
+    title: `预测${probShort.value}`,
+    key: 'predicted_probability',
     render: (r) => fmtProb(r.predicted_probability, 3),
   },
-  { title: '实际评级', key: 'actual_rating', width: 96, render: (r) => h(RatingTag, { rating: r.actual_rating }) },
-  { title: '预测评级', key: 'predicted_rating', width: 96, render: (r) => h(RatingTag, { rating: r.predicted_rating }) },
-]
+  {
+    title: '评级/分档',
+    key: 'risk_rating',
+    render: (r) => h(RatingTag, { rating: r.risk_rating }),
+  },
+])
+
+async function runInference() {
+  if (!store.selectedRun) return
+  infLoading.value = true
+  try {
+    const r = await api.inference(store.selectedRun, infYear.value, 50)
+    infItems.value = r.items
+    infMeta.value = { n_companies: r.n_companies, year: r.year }
+    if (!r.items.length) {
+      message.warning(`${r.year} 年无可推理公司（特征不足）`)
+    }
+  } catch (e) {
+    message.error(`推理失败：${e.message}`)
+  } finally {
+    infLoading.value = false
+  }
+}
 
 function exportCsv() {
-  const head = ['symbol', 'prediction_year', 'actual_probability', 'predicted_probability', 'actual_rating', 'predicted_rating']
+  const head = ['rank', 'symbol', 'predicted_probability', 'risk_rating']
   const lines = [head.join(',')]
-  for (const r of filtered.value) {
-    lines.push([r.symbol, r.prediction_year, r.actual_probability, r.predicted_probability, r.actual_rating, r.predicted_rating].join(','))
+  for (const r of infItems.value) {
+    lines.push([r.rank, r.symbol, r.predicted_probability, r.risk_rating ?? ''].join(','))
   }
   const blob = new Blob(['\uFEFF' + lines.join('\n')], { type: 'text/csv;charset=utf-8' })
   const a = document.createElement('a')
   a.href = URL.createObjectURL(blob)
-  a.download = `风险评测_${store.selectedRun || 'latest'}.csv`
+  a.download = `Top50_${store.selectedRun}_${infYear.value}.csv`
   a.click()
   URL.revokeObjectURL(a.href)
-  message.success(`已导出 ${filtered.value.length} 行`)
+  message.success(`已导出 ${infItems.value.length} 行`)
 }
 
 async function loadMeta() {
@@ -85,6 +94,7 @@ async function loadRun() {
     const [m, t] = await Promise.all([api.modelMetrics(run), api.predictionsTest(run)])
     metrics.value = m
     testItems.value = t.items
+    await runInference()
   } finally {
     loading.value = false
   }
@@ -100,7 +110,7 @@ onMounted(async () => {
 
 <template>
   <div>
-    <PageHeader title="风险评测" subtitle="模型指标、实际 vs 预测与 TGC/KMV 对照表">
+    <PageHeader title="风险评测" subtitle="模型指标、实际 vs 预测，以及按年份的实时风险推理">
       <template #extra>
         <RunSelecter v-if="meta" :runs="meta.runs" />
       </template>
@@ -130,34 +140,37 @@ onMounted(async () => {
       </n-gi>
     </n-grid>
 
-    <!-- 对照表 -->
-    <ChartCard :loading="loading" :empty="!testItems.length" style="margin-top: 16px">
+    <!-- 实时推理 Top50 -->
+    <ChartCard :loading="infLoading" :empty="!infItems.length"
+      empty-text="输入年份后点击「计算」" style="margin-top: 16px">
       <template #header>
-        <div class="table-header">
-          <span class="title">TGC vs KMV 对照表</span>
+        <div class="inf-header">
+          <span class="title">实时风险推理 Top 50（{{ infMeta.year }} 年预测）</span>
           <div class="filters">
-            <n-select v-model:value="filterRating" :options="RATING_OPTIONS" placeholder="评级" clearable size="small" style="width: 100px" />
-            <n-select v-model:value="filterYear" :options="yearOptions" placeholder="年份" clearable size="small" style="width: 100px" />
-            <n-input v-model:value="search" placeholder="代码搜索" clearable size="small" style="width: 130px" />
-            <n-button size="small" type="primary" ghost @click="exportCsv">导出 CSV</n-button>
+            <n-input-number v-model:value="infYear" :min="2004" :max="INF_YEAR" size="small"
+              style="width: 120px" @keyup.enter="runInference" />
+            <n-button size="small" type="primary" :loading="infLoading" @click="runInference">计算</n-button>
+            <n-button size="small" ghost :disabled="!infItems.length" @click="exportCsv">导出 CSV</n-button>
           </div>
         </div>
       </template>
       <n-data-table
-        :columns="columns"
-        :data="filtered"
+        :columns="infColumns"
+        :data="infItems"
         :bordered="false"
         size="small"
-        :scroll-x="640"
-        :pagination="{ pageSize: 20 }"
-        :max-height="520"
+        :max-height="560"
       />
+      <div class="inf-meta">
+        参与公司 {{ infMeta.n_companies }} 家 · 基于 {{ infMeta.year - 3 }}–{{ infMeta.year - 1 }} 年特征 ·
+        模型 {{ store.selectedRun }}
+      </div>
     </ChartCard>
   </div>
 </template>
 
 <style scoped>
-.table-header {
+.inf-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -175,5 +188,11 @@ onMounted(async () => {
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+.inf-meta {
+  margin-top: 10px;
+  font-size: 12px;
+  opacity: 0.55;
 }
 </style>

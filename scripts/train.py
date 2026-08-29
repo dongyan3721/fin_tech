@@ -90,8 +90,11 @@ def parse_args() -> argparse.Namespace:
                    help="时序编码器 (default: gated_conv)")
 
     p.add_argument("--label-scheme", type=str, default=None,
-                   choices=["kmv", "hybrid"],
-                   help="标签方案：kmv=基线简化KMV, hybrid=方案D混合标签 (default: 取 config)")
+                   choices=["kmv", "hybrid", "market", "mix"],
+                   help="标签方案：kmv=基线KMV, hybrid=方案D混合标签, market=市场风险标签, mix=综合风险标签")
+    p.add_argument("--target-column", type=str, default=None,
+                   choices=["default_probability", "market_risk_label", "composite_risk_label"],
+                   help="监督目标列：default=违约概率(KMV语义), market_risk_label=市场风险, composite_risk_label=综合风险")
     p.add_argument("--no-prepare-label", action="store_true",
                    help="训练前不重新生成标签，直接使用磁盘已有的 processed 标签")
 
@@ -123,6 +126,8 @@ def build_config(args: argparse.Namespace):
 
     if args.label_scheme is not None:
         cfg.labels.label_scheme = args.label_scheme
+    if args.target_column is not None:
+        cfg.labels.target_column = args.target_column
 
     if args.agent and not args.no_agent:
         cfg.agent.enabled = True
@@ -148,6 +153,7 @@ def print_config(cfg, args: argparse.Namespace) -> None:
     print(f"  Dropout:     {cfg.model.dropout}")
     print(f"  时序编码器:  {cfg.model.temporal_encoder}")
     print(f"  标签方案:    {cfg.labels.label_scheme}")
+    print(f"  监督目标列:  {cfg.labels.target_column}")
     print(f"  标签变换:    {cfg.model.label_transform}")
     print(f"  建图方案:    {cfg.model.graph_scheme} (lag={cfg.model.graph_lag})")
     print(f"  Agent:       {'反思 Agent' if cfg.agent.enabled else '关闭'}")

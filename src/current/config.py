@@ -108,6 +108,14 @@ class LabelConfig:
     star_st_probability: float = 0.85      # 年度处于 *ST（退市风险警示）
     delist_probability: float = 0.9        # 年度退市（仅 ST/*ST 前缀的失败退市）
 
+    # —— 市场风险标签（手册：GARCH 商品风险 → 行业加权 → 企业份额调整）——
+    target_column: str = "default_probability"  # 训练监督目标列（default_probability | market_risk_label）
+    market_var_z: float = 1.645           # VaR 置信水平 95% 的 Z 值
+    market_share_alpha: float = 0.5       # 企业份额调整系数 α（Adjustment = 1 + α·ShareScore）
+    market_start_year: int = 2007         # 商品期货数据起始年
+    market_end_year: int = 2025           # 商品期货数据截止年
+    mix_kmv_weight: float = 0.5           # 综合标签(mix方案)中 KMV 秩的权重
+
 
 @dataclass
 class VizConfig:
@@ -165,6 +173,7 @@ class Config:
     edges_interim: Path = INTERIM_DIR / "edges.parquet"
     events_interim: Path = INTERIM_DIR / "events.parquet"
     labels_interim: Path = INTERIM_DIR / "labels.parquet"
+    market_dir: Path = REPO_DIR / "market"   # 市场风险标签数据（映射/权重/期货缓存/中间产物）
     nodes_parquet: Path = PROCESSED_DIR / "nodes.parquet"
     edges_parquet: Path = PROCESSED_DIR / "edges.parquet"
     labels_parquet: Path = PROCESSED_DIR / "labels.parquet"
@@ -212,24 +221,6 @@ def get_llm_config() -> dict:
         "endpoint": os.getenv("SILICON_ENDPOINT", ""),
         "api_key": os.getenv("SILICON_APIKEY", ""),
         "model": os.getenv("SILICON_MODEL", ""),
-    }
-
-
-def get_neo4j_config() -> dict:
-    """从 .env 读取 Neo4j 连接配置（server 启动同步 + scripts/export_neo4j.py 共用）。
-
-    .env 需写入（缺省时 server 优雅跳过同步）：
-        NEO4J_URI=bolt://localhost:7687
-        NEO4J_USER=neo4j
-        NEO4J_PASSWORD=<你的密码>
-        NEO4J_DATABASE=neo4j   # 可选，默认 neo4j
-    """
-    load_dotenv()
-    return {
-        "uri": os.getenv("NEO4J_URI", ""),
-        "user": os.getenv("NEO4J_USER", "neo4j"),
-        "password": os.getenv("NEO4J_PASSWORD", ""),
-        "database": os.getenv("NEO4J_DATABASE", "neo4j"),
     }
 
 

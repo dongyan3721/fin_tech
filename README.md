@@ -1,5 +1,7 @@
 # FIN —— 基于图机器学习的供应链金融风险评估
 
+> 🚀 **第一次上手？请先看 [QUICKSTART.md](QUICKSTART.md)**（部署/配置/训练/扩展速查）。
+
 本仓库对原始的「过程数据 + 前辈代码」做了目录重构，并已用 **KMV 违约概率作为伪标签**跑通了 TGC（时序图卷积）训练基线。
 
 下文按「业务问题 → 数据长什么样 → 标签怎么来 → 模型怎么搭 → 输出是什么意思」说明前辈方案，便于接手学习（对应汇报 PPT「图灵风控」）。
@@ -450,6 +452,8 @@ repository/          # 全部新数据在此
 |------|--------|------|
 | 基线（默认） | `kmv` | 简化版 KMV 违约概率，不含任何事件混合 |
 | 混合标签（方案D） | `hybrid` | `default_probability = max(KMV, ST/*ST/失败退市事件概率)`，事件只上调风险、不下调；额外产出 `st_level` / `delisted` / `label_source` 列 |
+| 市场风险标签 | `market` | 手册方案：商品期货 GARCH→行业加权→企业份额调整，产出独立的 `market_risk_label` 列（训练用 `--target-column` 选择） |
+| 综合风险标签 | `mix` | KMV 与市场风险年内百分位秩加权融合（`mix_kmv_weight`，默认 0.5）为 `composite_risk_label`，单源缺失时权重自动重归一化 |
 
 ```powershell
 # 基线（默认，简化 KMV）
@@ -602,25 +606,16 @@ repository/          # 全部新数据在此
 | `ReflectionConfig.llm_enabled` | 是否调用 LLM 诊断 | True |
 | `ReflectionConfig.label_verify_enabled` | 是否用 Tushare `namechange` 交叉验证 ST 标签 | True |
 
-#### 12.5.6 Neo4j 连接配置（`.env`，可迁移性）
+#### 12.5.6 年度图缓存（无外部数据库）
 
-Neo4j 仅作为供应链图的落库/查询数据源，**不参与模型训练**；前端图谱经 FastAPI 读 parquet
-渲染，不直连 7687。在根目录 `.env` 写入以下键后，`server` 每次启动会自动把供应链图同步进
-Neo4j（幂等：节点 MERGE、关系先删后建），未配置/不可达则优雅跳过、不影响其他功能：
-
-| 键 | 含义 | 示例 |
-|----|------|------|
-| `NEO4J_URI` | Bolt 地址 | `bolt://localhost:7687` |
-| `NEO4J_USER` | 用户名 | `neo4j` |
-| `NEO4J_PASSWORD` | 密码 | `grapheval2026` |
-| `NEO4J_DATABASE` | 数据库名（可选） | `neo4j` |
-
-同步实现见 `server/services/neo4j_sync.py`（`sync_neo4j()`，启动时后台线程调用）；
-手动全量重建/校验可用：
+服务端**不依赖任何数据库**（Neo4j 已移除）：`server` 启动时（FastAPI lifespan）把
+`processed/{edges,labels}.parquet` 按年度构建的供应链图**全部预加载进内存缓存**
+（`server/services/graph_cache.py`，带逐年份日志埋点），之后 `/api/graph/*` 查询毫秒级返回。
+parquet 文件重训导出后 mtime 变化，缓存自动失效并在下次访问惰性重建。
 
 ```powershell
-& ".\.venv\Scripts\python.exe" scripts/export_neo4j.py           # 同步 + 校验
-& ".\.venv\Scripts\python.exe" scripts/export_neo4j.py --wipe    # 清空后同步
+& ".\.venv\Scripts\python.exe" -m src.current.cli export   # 重训后刷新 processed 数据
+bash server/api.sh restart                                  # 重启即完成图缓存预加载
 ```
 
 > 注：`cli train` 使用 `config.py` 默认超参；要覆盖上述 `ModelConfig` 字段做消融，

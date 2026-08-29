@@ -13,6 +13,7 @@ from src.current.config import CONFIG
 from src.current.labels.base import LabelContext, LabelScheme
 from src.current.labels.kmv import KMVLabeler, _risk_rating
 from src.current.labels.st import STLabeler
+from src.current.labels.market_garch import MarketGarchLabeler
 from src.current.registry import LABEL_SCHEMES
 
 
@@ -71,4 +72,75 @@ class HybridScheme(LabelScheme):
         # 事件概率已并入 default_probability，删除中间列避免混淆
         merged = merged.drop(columns=["event_probability"])
         print(f"[hybrid] 混合标签：{n_mixed} 行含事件，其中 {n_up} 行走高概率（max(KMV,事件)）")
+        return merged
+
+
+@LABEL_SCHEMES.register("mix")
+class MixScheme(LabelScheme):
+    """综合风险标签方案：KMV 违约概率 × 市场风险标签 秩归一化融合。
+
+    composite_risk_label = w·rank(KMV) + (1-w)·rank(市场风险)   （年内百分位秩）
+    仅一方可用时权重自动重归一化；训练经 --target-column composite_risk_label 启用。
+    """
+
+    output_column = "composite_risk_label"
+
+    def generate(self, ctx: LabelContext) -> pd.DataFrame:
+        kmv = KMVLabeler().generate(ctx).copy()
+        market = MarketGarchLabeler().generate(ctx).copy()
+        for df in (kmv, market):
+            df["symbol"] = df["symbol"].astype(str)
+            df["year"] = df["year"].astype(int)
+        merged = pd.merge(kmv, market, on=["symbol", "year"], how="outer")
+
+        w = CONFIG.labels.mix_kmv_weight
+        per_year = merged.groupby("year")
+        merged["kmv_rank"] = per_year["default_probability"].rank(pct=True)
+        merged["market_rank"] = per_year["market_risk_label"].rank(pct=True)
+
+        col = self.output_column
+        merged[col] = np.nan
+        both = merged["kmv_rank"].notna() & merged["market_rank"].notna()
+        only_kmv = merged["kmv_rank"].notna() & merged["market_rank"].isna()
+        only_mkt = merged["kmv_rank"].isna() & merged["market_rank"].notna()
+        merged.loc[both, col] = w * merged.loc[both, "kmv_rank"] + (1 - w) * merged.loc[both, "market_rank"]
+        merged.loc[only_kmv, col] = merged.loc[only_kmv, "kmv_rank"]
+        merged.loc[only_mkt, col] = merged.loc[only_mkt, "market_rank"]
+
+        merged["label_source"] = "none"
+        merged.loc[only_kmv, "label_source"] = "kmv"
+        merged.loc[only_mkt, "label_source"] = "market"
+        merged.loc[both, "label_source"] = "mix"
+
+        n_both, n_k, n_m = int(both.sum()), int(only_kmv.sum()), int(only_mkt.sum())
+        lab = merged[col].dropna()
+        print(f"[mix] 综合标签 {len(lab)} 行（双源 {n_both} / 仅KMV {n_k} / 仅市场 {n_m}，w={w}），"
+              f"范围 [{lab.min():.4f}, {lab.max():.4f}]")
+        return merged
+
+
+@LABEL_SCHEMES.register("market")
+class MarketScheme(LabelScheme):
+    """市场风险标签方案（手册：GARCH 商品风险 → 行业加权 → 企业份额调整）。
+
+    KMV 与市场风险并列外连接合并（两套语义独立的标签共存于 labels 表）；
+    训练时通过 config.LabelConfig.target_column / train.py --target-column 选择监督目标列。
+    """
+
+    def generate(self, ctx: LabelContext) -> pd.DataFrame:
+        kmv = KMVLabeler().generate(ctx)
+        market = MarketGarchLabeler().generate(ctx)
+
+        kmv = kmv.copy()
+        market = market.copy()
+        kmv["symbol"] = kmv["symbol"].astype(str)
+        market["symbol"] = market["symbol"].astype(str)
+        kmv["year"] = kmv["year"].astype(int)
+        market["year"] = market["year"].astype(int)
+
+        merged = pd.merge(kmv, market, on=["symbol", "year"], how="outer")
+        merged["label_source"] = "kmv"
+        merged.loc[merged["market_risk_label"].notna(), "label_source"] = "market"
+        print(f"[market] 合并后 {len(merged)} 行，其中含市场风险标签 "
+              f"{int(merged['market_risk_label'].notna().sum())} 行")
         return merged

@@ -59,7 +59,7 @@ def _load() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
 def build_dataset() -> DatasetBundle:
     nodes, labels, edges = _load()
     feats = [c for c in CONFIG.feature_columns if c in nodes.columns]
-    label_col = CONFIG.label_column
+    label_col = CONFIG.labels.target_column
     seq_len = CONFIG.seq_len
 
     common = set(nodes["symbol"].unique()) & set(labels["symbol"].unique())

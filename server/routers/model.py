@@ -83,6 +83,20 @@ def model_eval_log(run: str | None = Query(None)):
     return {"run": rid, "points": to_records(df[cols])}
 
 
+@router.get("/inference")
+def inference(run: str | None = Query(None),
+              year: int = Query(..., ge=1990, le=2100),
+              top: int = Query(50, ge=1, le=1000)):
+    """实时推理：所选 run 的 checkpoint 对目标年（用其前 3 年特征）前向预测 TopN。"""
+    rid = _resolve_or_404(run)
+    try:
+        from server.services.inference import predict_year
+
+        return predict_year(rid, year, top)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+
+
 @router.get("/predictions/test")
 def predictions_test(run: str | None = Query(None),
                      limit: int = Query(0, ge=0, description="0=全部")):

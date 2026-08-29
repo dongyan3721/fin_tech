@@ -39,4 +39,6 @@ export const api = {
 
   companySearch: (q) => request(`/company/search${qs({ q })}`),
   companyDetail: (symbol, run) => request(`/company/${encodeURIComponent(symbol)}${qs({ run })}`),
+
+  inference: (run, year, top = 50) => request(`/inference${qs({ run, year, top })}`),
 }

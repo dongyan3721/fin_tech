@@ -26,7 +26,6 @@ if str(PROJECT_ROOT) not in sys.path:
 
 import uvicorn
 from contextlib import asynccontextmanager
-from threading import Thread
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -37,29 +36,15 @@ from server.routers import graph, model, company
 FRONTEND_DIST = PROJECT_ROOT / "frontend" / "current" / "dist"
 
 
-def _startup_neo4j_sync() -> None:
-    """后台线程：启动时把供应链图同步到 Neo4j（未配置/不可达则优雅跳过）。"""
-    def _log(msg: str) -> None:
-        print(msg, flush=True)
-
-    try:
-        from server.services.neo4j_sync import sync_neo4j
-
-        result = sync_neo4j()
-        if result["status"] == "ok":
-            flag = "一致" if result["consistent"] else "不一致"
-            _log(f"[neo4j] 启动同步完成: 节点={result['nodes']} 关系={result['relationships']}（{flag}）")
-        elif result["status"] == "skipped":
-            _log(f"[neo4j] 启动同步跳过: {result['reason']}")
-        else:
-            _log(f"[neo4j] 启动同步失败({result['status']}): {result.get('reason')}")
-    except Exception as e:  # noqa: BLE001
-        _log(f"[neo4j] 启动同步异常: {e}")
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    Thread(target=_startup_neo4j_sync, daemon=True).start()
+    """启动时同步预加载所有年度图进缓存（带日志埋点，见 services/graph_cache）。
+
+    Neo4j 依赖已移除：图数据全部来自 processed parquet，启动慢一点换取查询毫秒级。
+    """
+    from server.services.graph_cache import preload_all_graphs
+
+    preload_all_graphs()
     yield
 
 
@@ -77,7 +62,9 @@ def create_app() -> FastAPI:
 
     @app.get("/api/health")
     def health():
-        return {"status": "ok"}
+        from server.services.graph_cache import cache_stats
+
+        return {"status": "ok", **cache_stats()}
 
     _mount_frontend(app)
     return app

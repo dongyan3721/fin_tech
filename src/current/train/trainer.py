@@ -482,7 +482,7 @@ class Trainer:
                 "symbol": split.companies,
                 "sequence_years": split.sequence_years,
                 "prediction_year": split.pred_years,
-                self.cfg.label_column: split.y,
+                self.cfg.labels.target_column: split.y,
             })
             for i in range(split.X.shape[1]):
                 for j in range(split.X.shape[2]):
