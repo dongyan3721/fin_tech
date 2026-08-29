@@ -1,0 +1,35 @@
+[dataset] 样本总数 1736；训练 991，测试 513，2025推演 258
+[graph] 按预测年建图(lag=1): 覆盖 14 个预测年, 样本级边=408
+[train] 建图方案=pred_year | 标签变换=logit | 模式: GCNConv(有图)
+[train] === 第一轮训练（均匀权重）===
+[train] epoch 0: loss=10.700170
+[train] epoch 50: loss=1.766535
+[train] epoch 100: loss=1.551340
+[train] epoch 150: loss=1.486026
+[train] epoch 200: loss=1.429880
+[train] epoch 250: loss=1.370611
+[graph] 按预测年建图(lag=1): 覆盖 4 个预测年, 样本级边=209
+[eval] 测试集 MSE=0.002390 RMSE=0.048893 MAE=0.032463 R2(prob)=-0.0917 R2(logit)=-0.0868 Spearman=0.4837 IC(Pearson)=0.4276
+
+[train] === 反思 Agent 分析 ===
+[reflection] 误差分析...
+[reflection] 标签交叉验证...
+[reflection] LLM 诊断...
+[reflection] 计算样本权重...
+[reflection] 权重统计: mean=1.000, boosted=387, reduced=388
+[reflection] 报告已保存: D:\Data\CodeRepository\py\GraghRiskEvaluate\repository\outputs\current_tgc_20260809_013010\reflection_report.json
+
+[train] === 第二轮训练（反思加权）===
+[trainR2] epoch 0: loss=9.852387
+[trainR2] epoch 50: loss=1.578302
+[trainR2] epoch 100: loss=1.363243
+[trainR2] epoch 150: loss=1.322535
+[trainR2] epoch 200: loss=1.256587
+[trainR2] epoch 250: loss=1.221388
+[graph] 按预测年建图(lag=1): 覆盖 4 个预测年, 样本级边=209
+[eval] 测试集 MSE=0.002630 RMSE=0.051281 MAE=0.031595 R2(prob)=-0.2009 R2(logit)=-0.0208 Spearman=0.5018 IC(Pearson)=0.3842
+[graph] 按预测年建图(lag=1): 覆盖 1 个预测年, 样本级边=76
+[predict] 2025 推演 258 家，平均违约概率=0.0290
+[metrics] 已写入 D:\Data\CodeRepository\py\GraghRiskEvaluate\repository\outputs\current_tgc_20260809_013010\metrics.json；台账 D:\Data\CodeRepository\py\GraghRiskEvaluate\repository\outputs\experiments_log.csv
+[train] 全部产物已保存到: D:\Data\CodeRepository\py\GraghRiskEvaluate\repository\outputs\current_tgc_20260809_013010
+完成: {'out_dir': 'D:\\Data\\CodeRepository\\py\\GraghRiskEvaluate\\repository\\outputs\\current_tgc_20260809_013010', 'mse': 0.0026296917301828217, 'rmse': 0.05128051998744574, 'mae': 0.031595040454827174, 'r2': -0.20094758561847237, 'r2_logit': -0.02076397829671528, 'spearman': 0.5018094416285527, 'ic': 0.38416056723045905, 'n_test': 513}

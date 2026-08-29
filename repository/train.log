@@ -1,0 +1,12 @@
+[dataset] 样本总数 1736；训练 991，测试 513，2025推演 258
+[graph] 按预测年建图(lag=1): 覆盖 14 个预测年, 样本级边=408
+[train] 建图方案=pred_year | 标签变换=logit | 模式: GCNConv(有图)
+[train] epoch 0: loss=14.062428
+[train] epoch 50: loss=2.102063
+[graph] 按预测年建图(lag=1): 覆盖 4 个预测年, 样本级边=209
+[eval] 测试集 MSE=0.002838 RMSE=0.053271 MAE=0.035520 R2(prob)=-0.2960 R2(logit)=0.0228 Spearman=0.4267 IC(Pearson)=0.3467
+[graph] 按预测年建图(lag=1): 覆盖 1 个预测年, 样本级边=76
+[predict] 2025 推演 258 家，平均违约概率=0.0279
+[metrics] 已写入 D:\Data\CodeRepository\py\GraghRiskEvaluate\repository\outputs\current_tgc_20260808_235341\metrics.json；台账 D:\Data\CodeRepository\py\GraghRiskEvaluate\repository\outputs\experiments_log.csv
+[train] 全部产物已保存到: D:\Data\CodeRepository\py\GraghRiskEvaluate\repository\outputs\current_tgc_20260808_235341
+完成: {'out_dir': 'D:\\Data\\CodeRepository\\py\\GraghRiskEvaluate\\repository\\outputs\\current_tgc_20260808_235341', 'mse': 0.0028378403806764477, 'rmse': 0.05327138425718303, 'mae': 0.03552042055901299, 'r2': -0.2960064917217684, 'r2_logit': 0.022849103905455692, 'spearman': 0.42672174721824024, 'ic': 0.3467440394846465, 'n_test': 513}

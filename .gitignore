@@ -6,6 +6,10 @@ outputs/
 .idea/
 2-过程部分数据/
 src/legacy
-repository/
+repository/interim
 /logs
 frontend/legacy
+repository/market
+repository/outputs
+repository/processed
+repository/raw
