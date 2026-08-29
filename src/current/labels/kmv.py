@@ -153,19 +153,25 @@ class KMVLabeler(RiskLabeler):
         E = df["market_cap"].astype(float)
         sigma_E = df["asset_volatility"].astype(float).clip(lower=vol_floor)
 
-        # 获取流动负债
-        if "total_cur_liab" in df.columns:
+        # 获取流动负债（total_cur_liab 与 current_liab 同源同义；历史数据可能只有后者，
+        # coalesce 防止"空列遮蔽"导致 DPT 大面积 NaN）
+        if "total_cur_liab" in df.columns and "current_liab" in df.columns:
+            cur_liab = df["total_cur_liab"].astype(float).fillna(df["current_liab"].astype(float))
+        elif "total_cur_liab" in df.columns:
             cur_liab = df["total_cur_liab"].astype(float)
         elif "current_liab" in df.columns:
             cur_liab = df["current_liab"].astype(float)
         else:
             cur_liab = None
 
-        # 计算违约点 DPT
-        if cur_liab is not None and not cur_liab.isna().all():
+        # 计算违约点 DPT（行级回退：流动负债缺失的行用 总负债×ratio，
+        # 避免"整列回退"因个别行有值而失效导致大面积 NaN——2026-08 事故根因）
+        if cur_liab is not None:
             # 标准 DPT = 短期负债 + 0.5 × 长期负债
             # 近似：短期负债 ≈ 流动负债，长期负债 ≈ 总负债 - 流动负债
             dpt_values = 0.5 * cur_liab + 0.5 * df["total_liab"].astype(float)
+            fallback = df["total_liab"].astype(float) * ratio
+            dpt_values = dpt_values.where(dpt_values.notna(), fallback)
         else:
             # 回退到简化版 DPT
             dpt_values = df["total_liab"].astype(float) * ratio
