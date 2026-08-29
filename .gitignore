@@ -13,3 +13,4 @@ repository/market
 repository/outputs
 repository/processed
 repository/raw
+repository/*.log
